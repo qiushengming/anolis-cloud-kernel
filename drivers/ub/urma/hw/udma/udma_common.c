@@ -649,10 +649,6 @@ udma_alloc_hugepage_priv(struct udma_dev *dev, uint32_t len)
 		return NULL;
 
 	priv->va_len = ALIGN(len, UDMA_HUGEPAGE_SIZE);
-	if (priv->va_len >> UDMA_HUGEPAGE_SHIFT > dev->total_hugepage_num) {
-		dev_err(dev->dev, "insufficient resources for mmap.\n");
-		goto err_vmalloc_huge;
-	}
 
 	priv->left_va_len = priv->va_len;
 	priv->va_base = vmalloc_huge(priv->va_len, GFP_KERNEL);
@@ -669,12 +665,12 @@ udma_alloc_hugepage_priv(struct udma_dev *dev, uint32_t len)
 	}
 
 	refcount_set(&priv->refcnt, 1);
+	priv->seq = (uint32_t)atomic_inc_return(&dev->hugepage_seq);
 	list_add(&priv->list, &dev->hugepage_list);
-	dev->total_hugepage_num -= priv->va_len >> UDMA_HUGEPAGE_SHIFT;
 
 	if (dfx_switch)
-		dev_info_ratelimited(dev->dev, "map_hugepage, 2m_page_num=%u.\n",
-				     priv->va_len >> UDMA_HUGEPAGE_SHIFT);
+		dev_info_ratelimited(dev->dev, "alloc_hugepage, seq=%u, 2m_page_num=%u.\n",
+				     priv->seq, priv->va_len >> UDMA_HUGEPAGE_SHIFT);
 	return priv;
 
 err_pin:
@@ -721,8 +717,8 @@ udma_alloc_hugepage(struct udma_dev *dev, uint32_t len)
 	mutex_unlock(&dev->hugepage_lock);
 
 	if (dfx_switch)
-		dev_info_ratelimited(dev->dev, "occupy_hugepage, 4k_page_num=%u.\n",
-				     hugepage->va_len >> UDMA_HW_PAGE_SHIFT);
+		dev_info_ratelimited(dev->dev, "occupy_hugepage, seq=%u, 4k_page_num=%u.\n",
+				     priv->seq, len >> UDMA_HW_PAGE_SHIFT);
 	return hugepage;
 }
 
@@ -731,15 +727,12 @@ static void udma_free_hugepage(struct udma_dev *dev, struct udma_hugepage *hugep
 	struct udma_hugepage_priv *priv = hugepage->priv;
 
 	if (dfx_switch)
-		dev_info_ratelimited(dev->dev, "return_hugepage, 4k_page_num=%u.\n",
-				     hugepage->va_len >> UDMA_HW_PAGE_SHIFT);
+		dev_info_ratelimited(dev->dev, "return_hugepage, seq=%u.\n", priv->seq);
 	mutex_lock(&dev->hugepage_lock);
 	if (refcount_dec_and_test(&priv->refcnt)) {
 		if (dfx_switch)
-			dev_info_ratelimited(dev->dev, "unmap_hugepage, 2m_page_num=%u.\n",
-					     priv->va_len >> UDMA_HUGEPAGE_SHIFT);
+			dev_info_ratelimited(dev->dev, "free_hugepage, seq=%u.\n", priv->seq);
 		list_del(&priv->list);
-		dev->total_hugepage_num += priv->va_len >> UDMA_HUGEPAGE_SHIFT;
 
 		udma_unpin_k_addr(priv->umem);
 		vfree(priv->va_base);
@@ -899,8 +892,7 @@ void udma_destroy_hugepage(struct udma_dev *dev)
 	mutex_lock(&dev->hugepage_lock);
 	list_for_each_entry_safe(priv, tmp, &dev->hugepage_list, list) {
 		list_del(&priv->list);
-		dev_info(dev->dev, "unmap_hugepage, 2m_page_num=%u.\n",
-			 priv->va_len >> UDMA_HUGEPAGE_SHIFT);
+		dev_info_ratelimited(dev->dev, "free_hugepage, seq=%u.\n", priv->seq);
 		udma_unpin_k_addr(priv->umem);
 		vfree(priv->va_base);
 		kfree(priv);
