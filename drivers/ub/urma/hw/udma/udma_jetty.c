@@ -773,11 +773,11 @@ struct ubcore_jetty *udma_create_jetty(struct ubcore_device *ub_dev, struct ubco
 		dev_err(udma_dev->dev, "active jetty detail failed, ret = %d.\n", ret);
 
 		kfree(udma_jetty);
+<<<<<<< HEAD
 		return ERR_PTR(ret);
+=======
+		return NULL;
 	}
-
-	udma_jetty->sq.activated = true;
-
 	return &udma_jetty->ubcore_jetty;
 }
 
