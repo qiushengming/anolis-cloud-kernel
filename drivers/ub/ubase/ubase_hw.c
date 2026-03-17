@@ -225,6 +225,7 @@ static int ubase_parse_dev_res(struct ubase_dev *udev,
 			       struct ubase_res_cmd_resp *resp)
 {
 	ubase_parse_dev_caps(udev, resp);
+
 	return ubase_check_dev_caps(udev);
 }
 
@@ -697,6 +698,7 @@ int ubase_query_port_bitmap(struct ubase_dev *udev)
 		dev_warn(udev->dev,
 			 "The function of querying real-time traffic in UBOE mode is not supported.\n");
 	}
+
 	if (ret && ret != -EPERM) {
 		dev_err(udev->dev,
 			"failed to query port bitmap, ret = %d.\n", ret);
