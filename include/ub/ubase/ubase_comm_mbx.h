@@ -24,11 +24,12 @@
  * struct ubase_cmd_mailbox - mailbox cmmand address
  * @buf: virtual address
  * @dma: dma address
+ * @count: reference count
  */
 struct ubase_cmd_mailbox {
 	void *buf;
 	dma_addr_t dma;
-	CK_KABI_RESERVE(1)
+	CK_KABI_USE(1, atomic_t count)
 	CK_KABI_RESERVE(2)
 	CK_KABI_RESERVE(3)
 	CK_KABI_RESERVE(4)
