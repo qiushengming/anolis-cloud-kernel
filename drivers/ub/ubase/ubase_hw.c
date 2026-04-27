@@ -6,7 +6,6 @@
 
 #include <linux/delay.h>
 #include <linux/ummu_core.h>
-#include <ub/ubase/ubase_comm_mbx.h>
 #include <ub/ubase/ubase_comm_qos.h>
 
 #include "ubase_cmd.h"
