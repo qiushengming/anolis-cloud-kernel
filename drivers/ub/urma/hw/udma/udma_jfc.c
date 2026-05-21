@@ -342,7 +342,7 @@ err_alloc_cqc:
 err_store_jfcn:
 	udma_id_free(&dev->jfc_table.ida_table, jfc->jfcn);
 
-	return -ENOMEM;
+	return ret;
 }
 
 static int udma_alloc_jfc_id(struct udma_dev *udma_dev, uint32_t *idx, struct udma_res *jetty_res)
