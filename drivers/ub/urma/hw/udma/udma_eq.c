@@ -676,6 +676,7 @@ static int udma_ctrlq_send_eid_update_response(struct udma_dev *udma_dev, uint16
 static int udma_ctrlq_eid_update(struct auxiliary_device *adev, uint8_t service_ver,
 				 void *data, uint16_t len, uint16_t seq)
 {
+#define EDRVNOEXIST 255
 	struct udma_ctrlq_eid_out_update eid_entry = {};
 	struct udma_dev *udma_dev;
 	int ret;
@@ -691,8 +692,10 @@ static int udma_ctrlq_eid_update(struct auxiliary_device *adev, uint8_t service_
 		return -EOPNOTSUPP;
 	}
 
-	if (udma_dev->status != UDMA_NORMAL)
-		return udma_ctrlq_send_eid_update_response(udma_dev, seq, 0);
+	if (udma_dev->status != UDMA_NORMAL) {
+		dev_err(udma_dev->dev, "udma dev is not ready!\n");
+		return udma_ctrlq_send_eid_update_response(udma_dev, seq, -EDRVNOEXIST);
+	}
 
 	if (len < sizeof(struct udma_ctrlq_eid_out_update)) {
 		dev_err(udma_dev->dev, "message length(%u) is invalid.\n", len);
