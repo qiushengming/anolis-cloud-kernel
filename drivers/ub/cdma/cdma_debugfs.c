@@ -18,6 +18,7 @@
 
 #define BUF_10_BASE 10
 #define BUF_SIZE 8
+#define CDMA_S_IRUSR 0400
 
 /* ctx debugfs start */
 static void cdma_get_ctx_info(struct cdma_dev *cdev,
@@ -203,8 +204,14 @@ static int cdma_dbg_dump_ctx(struct seq_file *s, enum cdma_dbg_ctx_type ctx_type
 		void (*get_title)(struct seq_file *s);
 		void (*get_cfg)(struct cdma_queue *queue, struct seq_file *s);
 	} dbg_ctx[] = {
-		{cdma_get_jfs_title, cdma_get_jfs_cfg},
-		{cdma_get_jfc_title, cdma_get_jfc_cfg},
+		{
+			.get_title = cdma_get_jfs_title,
+			.get_cfg = cdma_get_jfs_cfg,
+		},
+		{
+			.get_title = cdma_get_jfc_title,
+			.get_cfg = cdma_get_jfc_cfg,
+		},
 	};
 	struct cdma_dev *cdev = dev_get_drvdata(s->private);
 	u32 queue_id = cdev->cdbgfs.cfg.queue_id;
@@ -711,9 +718,9 @@ static int cdma_dbg_create_cfg_file(struct cdma_dev *cdev,
 		for (j = 0; j < ARRAY_SIZE(cdma_dbg_cfg); j++) {
 			if (!cdma_dbg_cfg[j].dentry_valid[i])
 				continue;
-			debugfs_file = debugfs_create_file(cdma_dbg_cfg[j].name,
-				0400, cur_dir, &cdev->cdbgfs.cfg,
-				&cdma_dbg_cfg[j].file_ops);
+			debugfs_file = debugfs_create_file(
+				cdma_dbg_cfg[j].name, CDMA_S_IRUSR, cur_dir,
+				&cdev->cdbgfs.cfg, &cdma_dbg_cfg[j].file_ops);
 			if (!debugfs_file)
 				return -ENOMEM;
 		}
