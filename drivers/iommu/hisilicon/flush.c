@@ -7,6 +7,7 @@
 #include <linux/platform_device.h>
 #include <linux/preempt.h>
 #include <linux/bitops.h>
+#include <linux/ummu_core.h>
 
 #include "trace/trace.h"
 #include "ummu.h"
@@ -128,7 +129,7 @@ static void __ummu_tlbi_range(struct ummu_mcmdq_ent *cmd,
 			      struct ummu_domain *domain)
 {
 	struct ummu_device *ummu = core_to_ummu_device(domain->base_domain.core_dev);
-	unsigned long num_pages, gs, rg_start, rg_end, scale, num;
+	unsigned long num_pages, gs, rg_start, rg_end, scale, num, max_scale;
 	struct ummu_mcmdq_batch batch_cmds = {};
 	size_t ranged;
 
@@ -143,6 +144,10 @@ static void __ummu_tlbi_range(struct ummu_mcmdq_ent *cmd,
 		return;
 	}
 
+	max_scale = CMD_TLBI_RANGE_SCALE_MAX;
+	if (ummu->cap.options & UMMU_OPT_TLBI_LIMIT_SCALE)
+		max_scale = CMD_TLBI_RANGE_SCALE_LIMIT;
+
 	rg_start = range->iova;
 	rg_end = rg_start + range->size;
 	/* tg will be 12, 14, 16, indicating 4K, 16K, 64K pgtable */
@@ -156,10 +161,10 @@ static void __ummu_tlbi_range(struct ummu_mcmdq_ent *cmd,
 	while (rg_start < rg_end) {
 		cmd->tlbi.addr = rg_start;
 
-		scale = __ffs(num_pages);
+		scale = min(__ffs(num_pages), max_scale);
 		cmd->tlbi.scale = scale;
 
-		num = (num_pages >> scale) & CMD_TLBI_RANGE_NUM_MAX;
+		num = ((num_pages >> scale) & CMD_TLBI_RANGE_NUM_MAX) ?: CMD_TLBI_RANGE_NUM_MAX;
 		cmd->tlbi.num = num - 1;
 
 		ummu_mcmdq_batch_add(ummu, &batch_cmds, cmd);
@@ -172,54 +177,59 @@ static void __ummu_tlbi_range(struct ummu_mcmdq_ent *cmd,
 }
 
 static void ummu_tlbi_range(struct ummu_tlb_range *range, bool leaf,
-			    struct ummu_domain *domain)
+			    struct ummu_domain *u_domain)
 {
 	struct ummu_mcmdq_ent cmd = {0};
 	int err;
 
-	err = ummu_domain_tlbi_cmd(domain, UMMU_TLBI_SCOPE_RNG, UMMU_TLBI_SCENE_DMA, &cmd);
+	if (u_domain->base_domain.domain.type == IOMMU_DOMAIN_SVA)
+		err = ummu_domain_tlbi_cmd(u_domain, UMMU_TLBI_SCOPE_RNG,
+					   UMMU_TLBI_SCENE_SVA, &cmd);
+	else
+		err = ummu_domain_tlbi_cmd(u_domain, UMMU_TLBI_SCOPE_RNG,
+					   UMMU_TLBI_SCENE_DMA, &cmd);
 	if (err)
 		return;
 
 	cmd.tlbi.leaf = leaf;
-	__ummu_tlbi_range(&cmd, range, domain);
+	__ummu_tlbi_range(&cmd, range, u_domain);
 }
 
 /* for io_pgtable */
 void ummu_tlbi_context(void *cookie)
 {
-	struct ummu_domain *domain = (struct ummu_domain *)cookie;
+	struct ummu_domain *u_domain = (struct ummu_domain *)cookie;
 	struct ummu_device *ummu = core_to_ummu_device(
-					domain->base_domain.core_dev);
+					u_domain->base_domain.core_dev);
 	struct ummu_mcmdq_ent cmd = {0};
 	int err;
 
-	err = ummu_domain_tlbi_cmd(domain, UMMU_TLBI_SCOPE_CTX, UMMU_TLBI_SCENE_DMA, &cmd);
+	if (u_domain->base_domain.domain.type == IOMMU_DOMAIN_SVA && u_domain->tlbi_asid)
+		err = ummu_domain_tlbi_cmd(u_domain, UMMU_TLBI_SCOPE_CTX,
+					   UMMU_TLBI_SCENE_SVA, &cmd);
+	else
+		err = ummu_domain_tlbi_cmd(u_domain, UMMU_TLBI_SCOPE_CTX,
+					   UMMU_TLBI_SCENE_DMA, &cmd);
 	if (err)
 		return;
-	trace_ummu_flush_iotlb_all(domain->base_domain.tid, dev_name(ummu->dev));
+	trace_ummu_flush_iotlb_all(u_domain->base_domain.tid, dev_name(ummu->dev));
 	ummu_mcmdq_issue_cmd_with_sync(ummu, &cmd);
 }
 
 void ummu_tlbi_walk(unsigned long iova, size_t size, size_t granule,
 		    void *cookie)
 {
-	struct ummu_domain *domain = (struct ummu_domain *)cookie;
-	struct ummu_tlb_range range = {
-		.iova = iova,
-		.size = size,
-		.granule = granule,
-	};
+	struct ummu_domain *u_domain = (struct ummu_domain *)cookie;
 
-	ummu_tlbi_range(&range, false, domain);
+	ummu_core_tlb_inv_walk(u_domain->domain, iova, size, granule);
 }
 
 void ummu_tlbi_page(struct iommu_iotlb_gather *gather, unsigned long iova,
 		    size_t granule, void *cookie)
 {
-	struct ummu_domain *domain = (struct ummu_domain *)cookie;
+	struct ummu_domain *u_domain = (struct ummu_domain *)cookie;
 
-	iommu_iotlb_gather_add_page(&domain->base_domain.domain, gather, iova, granule);
+	iommu_iotlb_gather_add_page(u_domain->domain, gather, iova, granule);
 }
 
 void ummu_iotlb_sync(struct iommu_domain *domain,
@@ -235,7 +245,7 @@ void ummu_iotlb_sync(struct iommu_domain *domain,
 	ummu_tlbi_range(&range, true, u_domain);
 }
 
-void ummu_non_agent_iotlb_sync(struct iommu_domain *domain,
+void ummu_device_tlb_inv_walk(struct iommu_domain *domain,
 			       struct iommu_iotlb_gather *gather)
 {
 	struct ummu_domain *u_domain = to_ummu_domain(domain);
@@ -248,11 +258,27 @@ void ummu_non_agent_iotlb_sync(struct iommu_domain *domain,
 	ummu_tlbi_range(&range, false, u_domain);
 }
 
+void ummu_flush_iotlb_all_asid(struct iommu_domain *domain)
+{
+	struct ummu_domain *u_domain = to_ummu_domain(domain);
+
+	u_domain->tlbi_asid = true;
+	ummu_tlbi_context(u_domain);
+}
+
 void ummu_flush_iotlb_all(struct iommu_domain *domain)
 {
 	struct ummu_domain *u_domain = to_ummu_domain(domain);
 
 	ummu_tlbi_context(u_domain);
+}
+
+void ummu_sync_iommu_domain(struct ummu_base_domain *base_domain,
+			    struct iommu_domain *domain)
+{
+	struct ummu_domain *u_domain = to_ummu_domain(&base_domain->domain);
+
+	u_domain->domain = domain;
 }
 
 void ummu_init_flush_iotlb(struct ummu_device *ummu)

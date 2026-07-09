@@ -307,6 +307,9 @@ struct ummu_invalid_cfg_param {
  * @cfg_syn: synchronize configuration table by tid.
  * @tdev_support_attr: Check whether the UMMU device supports the tdev attribute.
  * @get_hw_cap: Get UMMU capability for device.
+ * @tlb_inv_walk: Synchronously invalidate all intermediate TLB state
+ *                (sometimes referred to as the "walk cache") for a virtual
+ *                address range.
  */
 struct ummu_core_ops {
 	int (*get_resource)(struct ummu_base_domain *d, struct resource_args *arg);
@@ -321,7 +324,9 @@ struct ummu_core_ops {
 	bool (*tdev_support_attr)(struct ummu_core_device *dev, struct tdev_attr *attr);
 	int (*get_hw_cap)(struct device *dev, u32 *hw_cap);
 
-	CK_KABI_RESERVE(1)
+	CK_KABI_USE(1, void (*tlb_inv_walk)(struct iommu_domain *domain,
+					    unsigned long iova, size_t size,
+					    size_t granule))
 	CK_KABI_RESERVE(2)
 	CK_KABI_RESERVE(3)
 	CK_KABI_RESERVE(4)
@@ -557,6 +562,7 @@ void dma_free_iova(struct iova_slot *slot);
 /**
  * ummu_fill_pages() - Fill a range of IOVA. It allocates pages and maps pages to the iova.
  * The API is not thread-safe.
+ * Deprecated: Use ummu_core_fill_pages() instead.
  * @slot: iova slot, generated from dma_alloc_iova.
  * @iova: iova start.
  * @nr_pages: fill pages count.
@@ -568,6 +574,7 @@ int ummu_fill_pages(struct iova_slot *slot, dma_addr_t iova, unsigned long nr_pa
 /**
  * ummu_drain_pages() - Drain a range of IOVA. It unmaps iova and releases pages.
  * The API is not thread-safe.
+ * Deprecated: Use ummu_core_drain_pages() instead.
  * @slot: iova slot, generated from dma_alloc_iova.
  * @iova: iova start.
  * @nr_pages: drain pages count.
@@ -575,6 +582,42 @@ int ummu_fill_pages(struct iova_slot *slot, dma_addr_t iova, unsigned long nr_pa
  * Return: 0 on success, or an error number.
  */
 int ummu_drain_pages(struct iova_slot *slot, dma_addr_t iova, unsigned long nr_pages);
+
+/**
+ * ummu_core_fill_pages() - Fill a range of IOVA, It allocates pages and maps pages to the iova.
+ * The API is not thread-safe.
+ * @slot: iova slot, generated from dma_alloc_iova.
+ * @iova: iova start.
+ * @nr_pages: fill pages count.
+ * @gfp: GFP flags for memory allocation(e.g., GFP_KERNEL, __GFP_ZERO).
+ *
+ * Return: 0 on success, or an error number.
+ */
+int ummu_core_fill_pages(struct iova_slot *slot, dma_addr_t iova,
+			 unsigned long nr_pages, gfp_t gfp);
+
+/**
+ * ummu_core_drain_pages() - Drain a range of IOVA, It unmaps iova and releases pages.
+ * The API is not thread-safe.
+ * @slot: iova slot, generated from dma_alloc_iova.
+ * @iova: iova start.
+ * @nr_pages: drain pages count.
+ *
+ * Return: 0 on success, or an error number.
+ */
+int ummu_core_drain_pages(struct iova_slot *slot, dma_addr_t iova, unsigned long nr_pages);
+
+/**
+ * ummu_core_tlb_inv_walk() - Synchronously invalidate all intermediate TLB state
+ * (sometimes referred to as the "walk cache") for a virtual address range.
+ * @domain: iommu domain
+ * @iova: IOVA representing the start of the range to be flushed
+ * @size: IOVA representing the end of the range to be flushed (inclusive)
+ * @granule: The interval at which to perform the flush
+ */
+void ummu_core_tlb_inv_walk(struct iommu_domain *domain, unsigned long iova,
+			    size_t size, size_t granule);
+
 #else
 static inline int ummu_dev_enable_feat(struct device *dev, enum iommu_dev_features f)
 {
@@ -612,6 +655,24 @@ static inline int ummu_drain_pages(struct iova_slot *slot, dma_addr_t iova,
 {
 	return -EOPNOTSUPP;
 }
+
+static inline int ummu_core_fill_pages(struct iova_slot *slot, dma_addr_t iova,
+				       unsigned long nr_pages, gfp_t gfp)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int ummu_core_drain_pages(struct iova_slot *slot, dma_addr_t iova,
+					unsigned long nr_pages)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void ummu_core_tlb_inv_walk(struct iommu_domain *domain, unsigned long iova,
+					  size_t size, size_t granule)
+{
+}
+
 #endif /* CONFIG_UB_UMMU_CORE */
 
 #if IS_ENABLED(CONFIG_UB_UMMU_CORE_DRIVER)
