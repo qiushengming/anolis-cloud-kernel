@@ -28,6 +28,7 @@ static void uburma_mmu_release(struct mmu_notifier *mn, struct mm_struct *mm)
 	struct uburma_file *file =
 		container_of(ub_mn, struct uburma_file, ub_mn);
 	struct uburma_device *ubu_dev = file->ubu_dev;
+	struct ubcore_ucontext *ucontext = NULL;
 	struct ubcore_device *ubc_dev;
 	int srcu_idx;
 
@@ -47,13 +48,13 @@ static void uburma_mmu_release(struct mmu_notifier *mn, struct mm_struct *mm)
 	ubc_dev = srcu_dereference(ubu_dev->ubc_dev, &ubu_dev->ubc_dev_srcu);
 
 	down_write(&file->ucontext_rwsem);
-
+	ucontext = file->ucontext;
 	uburma_cleanup_uobjs(file, UBURMA_REMOVE_CLOSE);
-	if (file->ucontext) {
+	if (ucontext) {
 		uburma_log_info("Start ubcore free ucontext.\n");
 		if (ubc_dev) {
-			ubcore_free_ucontext(ubc_dev, file->ucontext);
 			file->ucontext = NULL;
+			ubcore_free_ucontext(ubc_dev, ucontext);
 		}
 	}
 	up_write(&file->ucontext_rwsem);
@@ -145,7 +146,7 @@ void uburma_release_file(struct kref *ref)
 	ubc_dev = srcu_dereference(file->ubu_dev->ubc_dev,
 				   &file->ubu_dev->ubc_dev_srcu);
 	if (ubc_dev && !ubc_dev->ops->disassociate_ucontext &&
-	    ubc_dev->ops->owner != NULL)
+	    ubc_dev->ops->owner)
 		module_put(ubc_dev->ops->owner);
 
 	srcu_read_unlock(&file->ubu_dev->ubc_dev_srcu, srcu_idx);
@@ -184,7 +185,7 @@ int uburma_open(struct inode *inode, struct file *filp)
 	}
 
 	if (!ubc_dev->ops->disassociate_ucontext &&
-	    !ubc_dev->ops->owner) {
+	    ubc_dev->ops->owner) {
 		if (!try_module_get(ubc_dev->ops->owner)) {
 			ret = -ENODEV;
 			goto err;
@@ -233,6 +234,7 @@ int uburma_close(struct inode *inode, struct file *filp)
 {
 	struct uburma_file *file = filp->private_data;
 	struct uburma_device *ubu_dev = file->ubu_dev;
+	struct ubcore_ucontext *ucontext = NULL;
 	struct ubcore_device *ubc_dev;
 	int srcu_idx;
 
@@ -255,11 +257,12 @@ int uburma_close(struct inode *inode, struct file *filp)
 	mutex_unlock(&ubu_dev->uburma_file_list_mutex);
 
 	down_write(&file->ucontext_rwsem);
+	ucontext = file->ucontext;
 	uburma_cleanup_uobjs(file, UBURMA_REMOVE_CLOSE);
-	if (file->ucontext) {
+	if (ucontext) {
 		uburma_log_info("Start ubcore free ucontext.\n");
-		ubcore_free_ucontext(ubc_dev, file->ucontext);
 		file->ucontext = NULL;
+		ubcore_free_ucontext(ubc_dev, ucontext);
 	}
 	up_write(&file->ucontext_rwsem);
 

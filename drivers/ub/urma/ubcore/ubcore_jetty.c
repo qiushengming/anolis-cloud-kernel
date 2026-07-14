@@ -828,7 +828,7 @@ struct ubcore_tjetty *ubcore_import_jfr(struct ubcore_device *dev,
 
 	if (ubcore_is_bonding_dev(dev)) {
 		if (ubcore_connect_exchange_udata_when_import_jetty(
-			    cfg, udata, true) != 0) {
+			    cfg, udata, true, dev) != 0) {
 			ubcore_log_err(
 				"Failed to exchange udata when import jfr\n");
 			return ERR_PTR(-ENOEXEC);
@@ -1540,7 +1540,7 @@ struct ubcore_tjetty *ubcore_import_jetty(struct ubcore_device *dev,
 
 	if (ubcore_is_bonding_dev(dev)) {
 		if (ubcore_connect_exchange_udata_when_import_jetty(
-			    cfg, udata, false) != 0) {
+			    cfg, udata, false, dev) != 0) {
 			ubcore_log_err(
 				"Failed to exchange udata when import jetty\n");
 			return ERR_PTR(-ENOEXEC);
@@ -1938,7 +1938,7 @@ int ubcore_bind_jetty_ex(struct ubcore_jetty *jetty,
 			 struct ubcore_active_tp_cfg *active_tp_cfg,
 			 struct ubcore_udata *udata)
 {
-	if (!jetty || !tjetty || jetty->ub_dev ||
+	if (!jetty || !tjetty || !jetty->ub_dev ||
 	    !jetty->ub_dev->ops || !active_tp_cfg) {
 		ubcore_log_err("Invalid parameter.\n");
 		return -EINVAL;

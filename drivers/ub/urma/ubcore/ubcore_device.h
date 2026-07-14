@@ -24,6 +24,9 @@ int ubcore_cdev_register(void);
 int ubcore_cdev_unregister(void);
 int ubcore_set_ns_mode(bool shared);
 int ubcore_set_dev_ns(char *device_name, uint32_t ns_fd);
+int ubcore_expose_dev_ns(char *device_name, uint32_t ns_fd);
+int ubcore_unexpose_dev_ns(char *device_name, uint32_t ns_fd);
+int ubcore_set_dev_eid_ns(char *device_name, uint32_t eid_index, uint32_t ns_fd);
 bool ubcore_dev_accessible(struct ubcore_device *dev, struct net *net);
 int ubcore_get_max_mtu(struct ubcore_device *dev, enum ubcore_mtu *mtu);
 struct ubcore_nlmsg *ubcore_new_mue_dev_msg(struct ubcore_device *dev);
@@ -41,8 +44,6 @@ void ubcore_clear_pattern1_eid(struct ubcore_device *dev,
 			       union ubcore_eid *eid);
 void ubcore_clear_pattern3_eid(struct ubcore_device *dev,
 			       union ubcore_eid *eid);
-int ubcore_delete_sip(struct ubcore_sip_info *sip);
-void ubcore_uvs_release_sip_list(struct ubcore_uvs_instance *uvs);
 
 static inline bool ubcore_check_ctrlplane(struct ubcore_device *dev)
 {
