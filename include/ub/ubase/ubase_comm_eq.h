@@ -17,8 +17,10 @@ enum ubase_drv_type {
 	UBASE_DRV_FWCTL,
 	UBASE_DRV_PMU,
 	UBASE_DRV_UVB,
+	UBASE_DRV_UBASEPROXY,
 	UBASE_DRV_MAX,
 };
+
 enum ubase_subevent_jetty_type {
 	UBASE_SUBEVENT_TYPE_JFS_CHECK_ERROR = 0x01,
 	UBASE_SUBEVENT_TYPE_JFR_CHECK_ERROR,
@@ -58,10 +60,14 @@ enum ubase_event_type {
  * @back: arbitrary registered pointer
  */
 struct ubase_event_nb {
-	enum ubase_drv_type	drv_type;
+	int			drv_type; /* see ubase_drv_type */
 	u8			event_type;
 	struct notifier_block	nb;
 	void			*back;
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 /**
@@ -72,6 +78,7 @@ struct ubase_event_nb {
  * @owner: owner bit
  * @num: jfsn/jettyn/jfrn/jfcn/jtgn/tpn
  * @rsv1: reserved bits
+ * @rsv2: reserved bits
  * @out_param: mailbox output parameter
  * @seq_num: mailbox sequence number
  * @status: mailbox status
@@ -114,6 +121,10 @@ struct ubase_aeq_notify_info {
 	u8			event_type;
 	u8			sub_type;
 	struct ubase_aeqe	*aeqe;
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 int ubase_event_register(struct auxiliary_device *adev,
@@ -125,4 +136,4 @@ int ubase_comp_register(struct auxiliary_device *adev,
 					    unsigned long jfcn, void *data));
 void ubase_comp_unregister(struct auxiliary_device *adev);
 
-#endif
+#endif /* _UB_UBASE_COMM_EQ_H_ */

@@ -35,6 +35,11 @@ enum unic_jfs_ctx_mode {
 #define UNIC_PAGE_SIZE_4K		4096
 #define UNIC_AVAIL_SGMT_OST_INIT	512
 
+#define UNIC_CQE_STATUS_MAX		8
+#define UNIC_CQE_OTHERS_STATUS		7
+#define UNIC_CQE_SUB_STATUS_MAX		6
+#define UNIC_CQE_OTHERS_SUB_STATUS	5
+
 #define unic_sq_stats_inc(sq, cnt)	do {		\
 		typeof(sq) _sq = (sq);			\
 		u64_stats_update_begin(&(_sq)->syncp);	\
@@ -97,6 +102,11 @@ struct unic_sq_stats {
 	u64 fd_cnt;
 	u64 drop_cnt;
 	u64 cfg5_drop_cnt;
+	u64 polled_old_pi;
+	u64 polled_skb_null;
+	u64 pi_ci_over_depth;
+	u64 abn_cqe_total_cnt;
+	u64 abn_cqe_cnt[UNIC_CQE_STATUS_MAX][UNIC_CQE_SUB_STATUS_MAX];
 };
 
 struct unic_jfs_ctx {
@@ -272,6 +282,13 @@ struct unic_jfs_db {
 	__le16 rsv;
 };
 
+struct unic_tx_comp_stats {
+	u64	bytes;
+	u64	packets;
+	u64	abn_bytes;
+	u64	abn_packets;
+};
+
 struct unic_tx_page_info {
 	struct page	*p;
 	void		*sge_va_addr;
@@ -305,6 +322,20 @@ struct unic_sq {
 	struct unic_tx_buff	*tx_buff;
 };
 
+static inline void unic_sq_abn_cqe_inc(struct unic_sq *sq,
+				       unsigned int status,
+				       unsigned int sub_status)
+{
+	if (status > UNIC_CQE_OTHERS_STATUS)
+		status = UNIC_CQE_OTHERS_STATUS;
+	if (sub_status > UNIC_CQE_OTHERS_SUB_STATUS)
+		sub_status = UNIC_CQE_OTHERS_SUB_STATUS;
+	u64_stats_update_begin(&sq->syncp);
+	sq->stats.abn_cqe_total_cnt++;
+	sq->stats.abn_cqe_cnt[status][sub_status]++;
+	u64_stats_update_end(&sq->syncp);
+}
+
 void unic_poll_tx(struct unic_sq *sq, int budget);
 int unic_create_sq(struct unic_dev *unic_dev, u32 idx);
 void unic_destroy_sq(struct unic_dev *unic_dev, u32 num);
@@ -315,4 +346,4 @@ void unic_reset_tx_queue(struct net_device *netdev);
 void unic_dump_sq_stats(struct net_device *netdev, u32 queue_idx);
 void unic_mask_key_words(void *sqebb);
 
-#endif
+#endif /* __UNIC_TX_H__ */

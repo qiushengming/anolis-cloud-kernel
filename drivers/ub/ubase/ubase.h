@@ -14,6 +14,15 @@
 #define UBASE_MAX_TCG_NUM		(4)
 #define UBASE_PMEM_PAGE_SIZE		(2 * 1024 * 1024UL) /* 2MB */
 
+#define UBASE_FAULT_MODULE_ID		(0)
+#define UBASE_FAULT_EVENT_PROBE		(0)
+#define UBASE_FAULT_EVENT_REMOVE	(1)
+
+#define UBASE_FAULT_EVENT_ID_PROBE	(UBASE_FAULT_MODULE_ID << 24 | \
+					 UBASE_FAULT_EVENT_PROBE)
+#define UBASE_FAULT_EVENT_ID_REMOVE	(UBASE_FAULT_MODULE_ID << 24 | \
+					 UBASE_FAULT_EVENT_REMOVE)
+
 enum ubase_service_state {
 	UBASE_STATE_CRQ_SERVICE_SCHED,
 	UBASE_STATE_CRQ_HANDLING,
@@ -38,6 +47,8 @@ enum {
 	UBASE_SUPPORT_CTRLQ_B		= 5,
 	UBASE_SUPPORT_ETH_MAC_B		= 6,
 	UBASE_SUPPORT_MAC_STATS_B	= 10,
+	UBASE_SUPPORT_MBX_DISABLED_B	= 11,
+	UBASE_SUPPORT_MBX_PROXY_B	= 12,
 	UBASE_SUPPORT_PRE_ALLOC_B		= 13,
 	UBASE_SUPPORT_UDMA_DISABLE_B		= 14,
 	UBASE_SUPPORT_UNIC_DISABLE_B		= 15,
@@ -46,6 +57,11 @@ enum {
 	UBASE_SUPPORT_IP_OVER_URMA_UTP_B	= 18,
 	UBASE_SUPPORT_ACTIVATE_PROXY_B		= 19,
 	UBASE_SUPPORT_UTP_B			= 20,
+	UBASE_SUPPORT_DTU_B			= 21,
+	UBASE_SUPPORT_USC_B			= 22,
+	UBASE_SUPPORT_UCP_B			= 23,
+	UBASE_SUPPORT_PMU_IRQ_B			= 24,
+	UBASE_SUPPORT_NON_MIRROR_MEM_B		= 25,
 
 	/* must be last entry and it should <= UBASE_CAP_LEN * 32 */
 	UBASE_SUPPORT_MASK_NBITS
@@ -72,5 +88,6 @@ static inline u32 ubase_read_reg(u8 __iomem *base, u32 reg)
 	ubase_read_reg((a)->io_base.addr, reg)
 
 #define ubase_addr_gen(addr_h, addr_l) ((u64)(addr_h) << 32 | (addr_l))
+#define ubase_size_gen(size_h, size_l) ((u64)(size_h) << 32 | (size_l))
 
-#endif
+#endif /* __UBASE_H__ */

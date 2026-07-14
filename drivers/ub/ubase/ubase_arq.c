@@ -86,13 +86,16 @@ static void ubase_handle_activate_req(struct ubase_dev *udev, void *data,
 	if (!ubase_activate_proxy_supported(udev))
 		return;
 
+	udev->act_ctx.other.shutdown = req->shutdown;
+
 	ue = container_of(udev->dev, struct ub_entity, dev);
 	if (req->activate)
 		ret = ubase_activate_ue(udev, ue, msn, bus_ue_id);
 	else
 		ret = ubase_deactivate_ue(udev, ue, msn, bus_ue_id);
 
-	ubase_send_activate_resp(udev, req->bus_ue_id, req->msn, ret);
+	if (ret != -ETIMEDOUT)
+		ubase_send_activate_resp(udev, req->bus_ue_id, req->msn, ret);
 }
 
 struct ubase_arq_event {
@@ -147,6 +150,10 @@ void ubase_cmd_arq_handler(struct ubase_delay_work *ubase_work)
 		return;
 
 	while (atomic_read(&arq->count) > 0) {
+		/* Prevent read operations from being reordered, ensuring
+		 * the correct read order of the message queue.
+		 */
+		smp_rmb();
 		msg = &arq->msg[arq->ci];
 		event = ubase_get_arq_event(msg->opcode, msg->data_len);
 		if (event)
@@ -175,8 +182,8 @@ void ubase_add_to_arq(struct ubase_dev *udev, u16 opcode, void *msg_data,
 	struct ubase_arq_msg_ring *arq = &udev->arq;
 
 	if (atomic_read(&arq->count) >= MAX_ARQ_MSG_NUM) {
-		ubase_warn(udev,
-			   "arq queue full, drop opcode = 0x%x.\n", opcode);
+		ubase_warn_rl(udev, arq_queue_full,
+			      "arq queue full, drop opcode = 0x%x.\n", opcode);
 		return;
 	}
 
@@ -192,6 +199,11 @@ void ubase_add_to_arq(struct ubase_dev *udev, u16 opcode, void *msg_data,
 	arq->msg[arq->pi].data_len = msg_data_len;
 	arq->msg[arq->pi].opcode = opcode;
 	arq->pi = (arq->pi + 1) % MAX_ARQ_MSG_NUM;
+	/* Prevent write operation reordering, and ensure that the counter is
+	 * updated only after the write operation to the message queue is
+	 * completed.
+	 */
+	smp_wmb();
 	atomic_inc(&arq->count);
 
 	ubase_arq_task_schedule(udev);

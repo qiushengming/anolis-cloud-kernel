@@ -14,7 +14,7 @@
 #define UBASE_CMDQ_DESC_NUM_S		3
 #define UBASE_CMDQ_DESC_NUM		1024
 #define UBASE_CMDQ_TX_TIMEOUT		300000
-#define UBASE_CMDQ_MBX_TX_TIMEOUT	50
+#define UBASE_CMDQ_MBX_TX_TIMEOUT	3000
 #define UBASE_CMDQ_CLEAR_WAIT_TIME	200
 #define UBASE_CMDQ_WAIT_TIME		10
 
@@ -26,7 +26,7 @@
 #define UBASE_CMD_FLAG_ERR_INTR		BIT(5)
 #define UBASE_CMD_FLAG_GET_BD_NUM	BIT(6)
 
-#define UBASE_UE2UE_MSG_WAIT_TIME		3000
+#define UBASE_UE2UE_MSG_WAIT_TIME	3000
 
 #define UBASE_CRQ_SCHED_TIMEOUT		(HZ / 2)
 
@@ -37,6 +37,43 @@
 
 #define UBASE_MOVE_CRQ_RING_PTR(crq) \
 	((crq)->ci = ((crq)->ci + 1) % (crq)->desc_num)
+
+union ubase_mbox {
+	struct {
+		/* MB 0 */
+		__le32 in_param_l;
+		/* MB 1 */
+		__le32 in_param_h;
+		/* MB 2 */
+		__le32 cmd : 8;
+		__le32 tag : 24;
+		/* MB 3 */
+		__le32 seq_num : 16;
+		__le32 event_en : 1;
+		__le32 mbx_ue_id : 8;
+		__le32 rsv : 7;
+		/* MB 4 */
+		__le32 status : 1;
+		__le32 hw_run : 1;
+		__le32 rsv1 : 30;
+	};
+
+	struct {
+		__le32 query_status : 1;
+		__le32 query_hw_run : 1;
+		__le32 query_rsv : 30;
+	};
+};
+
+#define UBASE_DESC_DATA_LEN	6
+struct ubase_cmdq_desc {
+	__le16 opcode;
+	u8 flag;
+	u8 bd_num;
+	__le16 ret;
+	__le16 rsv;
+	__le32 data[UBASE_DESC_DATA_LEN];
+};
 
 enum ubase_cmd_state {
 	UBASE_STATE_CMD_DISABLE
@@ -49,6 +86,12 @@ struct ubase_query_version_cmd {
 
 enum ubase_drv_cap_bit {
 	UBASE_CAP_SUP_ACTIVATE_B = 0,
+	UBASE_PMU_CRQ_SUPPORT_B  = 1,
+};
+
+enum ubase_vl_map_type {
+	UBASE_PRIO_VL_MAP,
+	UBASE_DSCP_VL_MAP,
 };
 
 struct ubase_notify_drv_cap_cmd {
@@ -102,7 +145,9 @@ struct ubase_stop_perf_stats_cmd {
 	__le32	rx_port_bw;
 	__le32	tx_vl_bw[UBASE_STATS_MAX_VL_NUM];
 	__le32	rx_vl_bw[UBASE_STATS_MAX_VL_NUM];
-	u8	rsv1[8];
+
+	__le32	tx_max_port_bw;
+	__le32	rx_max_port_bw;
 };
 
 struct ubase_cfg_ets_vl_sch_cmd {
@@ -110,6 +155,21 @@ struct ubase_cfg_ets_vl_sch_cmd {
 	u8 rsvd[2];
 	u8 vl_bw[UBASE_MAX_VL_NUM];
 	__le32 port_bitmap;
+};
+
+struct ubase_close_perf_stats_cmd {
+	__le32	logic_port_bitmap[2];
+	u8	rsv[16];
+};
+
+struct ubase_query_dl_pkt_stats_cmd {
+	__le16	logic_port_id;
+	u8	rsvd[2];
+	__le32	tx_flit_num_l;
+	__le32	tx_flit_num_h;
+	__le32	rx_flit_num_l;
+	__le32	rx_flit_num_h;
+	u8	rsvd1[4];
 };
 
 struct ubase_cfg_tm_vl_sch_cmd {
@@ -255,11 +315,25 @@ struct ubase_query_tm_port_cmd {
 	u8 resv1[12];
 };
 
+struct ubase_config_vl_speed_cmd {
+	u8 resv0[2];
+	__le16 vl_bitmap;
+	__le32 max_speed[UBASE_MAX_VL_NUM];
+	u8 resv1[20];
+};
+
+struct ubase_config_dscp_tc_cmd {
+	u8 map_type;
+	u8 rsv[23];
+	u8 vl[UBASE_MAX_DSCP];
+};
+
 struct ubase_activate_req {
 	__le16	bus_ue_id;
 	__le16	msn;
 	u8	activate;
-	u8	resv[19];
+	u8	shutdown;
+	u8	resv[18];
 };
 
 struct ubase_activate_resp {
@@ -306,7 +380,8 @@ int ubase_send_cmd(struct ubase_dev *udev,
 
 int ubase_post_mailbox_by_event(struct ubase_dev *udev,
 				struct ubase_cmd_buf *in,
-				struct ubase_cmd_buf *out);
+				struct ubase_cmd_buf *out,
+				struct ubase_cmd_mailbox *mailbox);
 int __ubase_cmd_send_in(struct ubase_dev *udev, struct ubase_cmd_buf *in);
 int __ubase_cmd_send_inout(struct ubase_dev *udev, struct ubase_cmd_buf *in,
 			   struct ubase_cmd_buf *out);
@@ -319,4 +394,4 @@ void ubase_crq_service_task(struct ubase_delay_work *ubase_work);
 
 void ubase_mask_key_words(struct ubase_cmdq_desc *desc, u16 opc, int idx);
 
-#endif
+#endif /* __UBASE_CMD_H__ */

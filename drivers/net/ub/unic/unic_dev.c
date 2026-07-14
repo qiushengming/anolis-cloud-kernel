@@ -9,14 +9,14 @@
 #include <linux/etherdevice.h>
 #include <linux/netdevice.h>
 #include <net/rtnetlink.h>
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 #include <net/ub/ubl.h>
 #endif
 #include <ub/ubase/ubase_comm_cmd.h>
 #include <ub/ubase/ubase_comm_eq.h>
-#include <ub/ubase/ubase_comm_hw.h>
 #include <ub/ubase/ubase_comm_qos.h>
 
+#include "unic_bond.h"
 #include "unic_cmd.h"
 #include "unic_dcbnl.h"
 #include "unic_ethtool.h"
@@ -24,13 +24,12 @@
 #include "unic_guid.h"
 #include "unic_hw.h"
 #include "unic_ip.h"
-#include "unic_qos_hw.h"
 #include "unic_mac.h"
 #include "unic_netdev.h"
 #include "unic_vlan.h"
 #include "unic_dev.h"
 
-#define UNIC_WATCHDOG_TIMEOUT (5 * HZ)
+#define UNIC_WATCHDOG_TIMEOUT (30 * HZ)
 
 #ifndef UB_DATA_LEN
 #define UB_DATA_LEN 1500
@@ -117,50 +116,6 @@ static int unic_update_vl_sl_map(struct unic_dev *unic_dev)
 	return 0;
 }
 
-static inline void unic_get_hw_prio_vl(struct ubase_caps *caps, u8 *sw_prio_vl,
-				       u8 *hw_prio_vl)
-{
-	int i;
-
-	for (i = 0; i < UNIC_MAX_PRIO_NUM; i++)
-		hw_prio_vl[i] = caps->req_vl[sw_prio_vl[i]];
-}
-
-static inline void unic_get_hw_dscp_vl(struct ubase_caps *caps, u8 *hw_prio_vl,
-				       u8 *dscp_prio, u8 *hw_dscp_vl)
-{
-	int i;
-
-	for (i = 0; i < UBASE_MAX_DSCP; i++)
-		hw_dscp_vl[i] = dscp_prio[i] == UNIC_INVALID_PRIORITY ?
-				caps->req_vl[0] : hw_prio_vl[dscp_prio[i]];
-}
-
-int unic_set_vl_map(struct unic_dev *unic_dev, u8 *dscp_prio, u8 *prio_vl,
-		    u8 map_type)
-{
-	struct ubase_caps *caps = ubase_get_dev_caps(unic_dev->comdev.adev);
-	u8 hw_prio_vl[UNIC_MAX_PRIO_NUM];
-	u8 hw_dscp_vl[UBASE_MAX_DSCP];
-	int ret;
-
-	unic_get_hw_prio_vl(caps, prio_vl, hw_prio_vl);
-	unic_get_hw_dscp_vl(caps, hw_prio_vl, dscp_prio, hw_dscp_vl);
-
-	if (unic_dev_ets_supported(unic_dev) &&
-	    !unic_dev_ubl_supported(unic_dev)) {
-		ret = unic_set_hw_vl_map(unic_dev, hw_dscp_vl, hw_prio_vl,
-					 map_type);
-		if (ret)
-			return ret;
-	}
-
-	ubase_update_udma_dscp_vl(unic_dev->comdev.adev, hw_dscp_vl,
-				  UBASE_MAX_DSCP);
-
-	return 0;
-}
-
 static int unic_init_vl_map(struct unic_dev *unic_dev)
 {
 	struct unic_vl *vl = &unic_dev->channels.vl;
@@ -185,54 +140,43 @@ static void unic_vl_bitmap_init(struct unic_dev *unic_dev)
 	}
 }
 
-static int unic_init_vl_sch(struct unic_dev *unic_dev)
+static void unic_init_vl_sch(struct unic_dev *unic_dev)
 {
-#define UNIC_BW_PERCENT 100
-
 	struct auxiliary_device *adev = unic_dev->comdev.adev;
 	struct ubase_caps *caps = ubase_get_dev_caps(adev);
 	struct unic_vl *vl = &unic_dev->channels.vl;
-	u8 vl_tsa[UBASE_MAX_VL_NUM] = {0};
-	u8 vl_bw[UBASE_MAX_VL_NUM] = {0};
-	int quo, rem;
+	struct ubase_initial_qset_qos *initial_qos;
 	u32 i;
 
 	if (!unic_dev_ets_supported(unic_dev))
-		return 0;
+		return;
 
-	quo = UNIC_BW_PERCENT / caps->vl_num;
-	rem = UNIC_BW_PERCENT % caps->vl_num;
-
+	initial_qos = ubase_get_initial_qset_qos(adev);
 	for (i = 0; i < caps->vl_num; i++) {
-		vl->vl_tsa[i] = UNIC_VL_TSA_DWRR;
-		vl->vl_bw[i] = quo;
-		if (i < rem)
-			vl->vl_bw[i]++;
-
-		vl_bw[caps->req_vl[i]] = vl->vl_bw[i];
-		vl_bw[caps->resp_vl[i]] = vl->vl_bw[i];
-		vl_tsa[caps->req_vl[i]] = vl->vl_tsa[i];
-		vl_tsa[caps->resp_vl[i]] = vl->vl_tsa[i];
+		vl->vl_tsa[i] = initial_qos->qset_weight[caps->req_vl[i]] ?
+				UNIC_VL_TSA_DWRR : 0;
+		vl->vl_bw[i] = initial_qos->qset_weight[caps->req_vl[i]];
 	}
-
-	return ubase_config_tm_vl_sch(adev, vl->vl_bitmap, vl_bw, vl_tsa);
 }
 
-static int unic_init_vl_maxrate(struct unic_dev *unic_dev)
+static void unic_init_vl_maxrate(struct unic_dev *unic_dev)
 {
-	u64 max_speed = unic_dev->hw.mac.max_speed;
-	u64 vl_maxrate[UBASE_MAX_VL_NUM];
+	struct auxiliary_device *adev = unic_dev->comdev.adev;
+	struct ubase_caps *caps = ubase_get_dev_caps(adev);
+	struct unic_vl *vl = &unic_dev->channels.vl;
+	struct ubase_initial_qset_qos *initial_qos;
 	u8 i;
 
 	if (!unic_dev_ets_supported(unic_dev) ||
 	    !unic_dev_tc_speed_limit_supported(unic_dev))
-		return 0;
+		return;
 
-	for (i = 0; i < UBASE_MAX_VL_NUM; i++)
-		vl_maxrate[i] = max_speed * UNIC_MBYTE_PER_SEND;
-
-	return unic_config_vl_rate_limit(unic_dev, vl_maxrate,
-					 unic_dev->channels.vl.vl_bitmap);
+	initial_qos = ubase_get_initial_qset_qos(adev);
+	for (i = 0; i < caps->vl_num; i++) {
+		vl->vl_maxrate[i] = (u64)initial_qos->rate[caps->req_vl[i]] *
+				    UNIC_MBYTE_PER_SEND;
+		vl->maxrate = max(vl->maxrate, initial_qos->rate[caps->req_vl[i]]);
+	}
 }
 
 static int unic_init_pause(struct unic_dev *unic_dev)
@@ -287,13 +231,9 @@ static int unic_init_vl_info(struct unic_dev *unic_dev)
 	if (ret)
 		return ret;
 
-	ret = unic_init_vl_maxrate(unic_dev);
-	if (ret && ret != -EPERM)
-		return ret;
-
-	ret = unic_init_vl_sch(unic_dev);
-
-	return ret == -EPERM ? 0 : ret;
+	unic_init_vl_maxrate(unic_dev);
+	unic_init_vl_sch(unic_dev);
+	return 0;
 }
 
 static int unic_init_channels_attr(struct unic_dev *unic_dev)
@@ -330,7 +270,11 @@ static int unic_init_channels_attr(struct unic_dev *unic_dev)
 
 static void unic_uninit_channels_attr(struct unic_dev *unic_dev)
 {
+	struct auxiliary_device *adev = unic_dev->comdev.adev;
 	struct unic_channels *channels = &unic_dev->channels;
+
+	/* Prevent residual QoS configurations caused by the unic driver. */
+	ubase_restore_initial_qset_qos(adev);
 
 	mutex_destroy(&channels->mutex);
 }
@@ -351,8 +295,7 @@ u16 unic_cqe_period_round_down(u16 cqe_period)
 	u16 i;
 
 	for (i = 0; i < ARRAY_SIZE(period) - 1; i++) {
-		if (cqe_period >= period[i] &&
-		    cqe_period < period[i + 1])
+		if (cqe_period >= period[i] && cqe_period < period[i + 1])
 			return period[i];
 	}
 
@@ -407,7 +350,7 @@ int unic_init_rx(struct unic_dev *unic_dev, u32 num)
 		if (ret) {
 			dev_err(unic_dev->comdev.adev->dev.parent,
 				"failed to init rx cq(%u), ret=%d.\n", i, ret);
-				goto err_create_cq;
+			goto err_create_cq;
 		}
 	}
 
@@ -543,6 +486,7 @@ static inline void unic_uninit_rss(struct unic_dev *unic_dev)
 
 static void __unic_uninit_channels(struct unic_dev *unic_dev)
 {
+	struct auxiliary_device *adev = unic_dev->comdev.adev;
 	struct unic_channels *channels = &unic_dev->channels;
 	u32 i;
 
@@ -551,8 +495,10 @@ static void __unic_uninit_channels(struct unic_dev *unic_dev)
 	if (!channels->c)
 		return;
 
-	for (i = 0; i < channels->num; i++)
-		netif_napi_del(&channels->c[i].napi);
+	if (!ubase_adev_shutting_down(adev)) {
+		for (i = 0; i < channels->num; i++)
+			netif_napi_del(&channels->c[i].napi);
+	}
 
 	unic_destroy_jetty(unic_dev, channels->num);
 
@@ -635,11 +581,6 @@ static int unic_init_mac(struct unic_dev *unic_dev)
 	if (ret)
 		return ret;
 
-	ret = unic_dev_fec_supported(unic_dev) && mac->user_fec_mode ?
-		unic_set_fec_mode(unic_dev, mac->user_fec_mode) : 0;
-	if (ret)
-		return ret;
-
 	ret = unic_dev_init_mtu(unic_dev);
 	if (ret) {
 		dev_err(unic_dev->comdev.adev->dev.parent,
@@ -705,17 +646,31 @@ static void unic_task_schedule(struct unic_dev *unic_dev,
 		mod_delayed_work(unic_wq, &unic_dev->service_task, delay_time);
 }
 
+static void unic_sync_bond_port(struct unic_dev *unic_dev)
+{
+	struct net_device *netdev = unic_dev->comdev.netdev;
+
+	if (test_and_clear_bit(UNIC_STATE_SYNC_BOND_PORT, &unic_dev->state)) {
+		if (unic_sync_bond_status(netdev))
+			set_bit(UNIC_STATE_SYNC_BOND_PORT, &unic_dev->state);
+	}
+}
+
 static void unic_periodic_service_task(struct unic_dev *unic_dev)
 {
 #define UNIC_UPDATE_STATS_TIMER_INTERVAL	300UL
+
 	unsigned long delta = round_jiffies_relative(HZ);
 
 	unic_link_status_update(unic_dev);
 	unic_update_port_info(unic_dev);
 	unic_sync_ip_table(unic_dev);
+	unic_sync_bond_ip_table(unic_dev);
 
-	if (unic_dev_eth_mac_supported(unic_dev))
+	if (unic_dev_eth_mac_supported(unic_dev)) {
 		unic_sync_mac_table(unic_dev);
+		unic_sync_bond_port(unic_dev);
+	}
 
 	unic_sync_promisc_mode(unic_dev);
 	unic_sync_vlan_filter(unic_dev);
@@ -743,6 +698,8 @@ static void unic_init_vport_info(struct unic_dev *unic_dev)
 	spin_lock_init(&unic_dev->vport.addr_tbl.tmp_ip_lock);
 	INIT_LIST_HEAD(&unic_dev->vport.addr_tbl.ip_list);
 	spin_lock_init(&unic_dev->vport.addr_tbl.ip_list_lock);
+	INIT_LIST_HEAD(&unic_dev->vport.addr_tbl.bond_ip_list);
+	spin_lock_init(&unic_dev->vport.addr_tbl.bond_ip_list_lock);
 
 	if (unic_dev_eth_mac_supported(unic_dev)) {
 		INIT_LIST_HEAD(&unic_dev->vport.addr_tbl.uc_mac_list);
@@ -759,7 +716,8 @@ static int unic_alloc_vport_buf(struct unic_dev *unic_dev)
 	for (i = 0; i < unic_dev->caps.vport_buf_num; i++) {
 		unic_dev->vbuf[i].buf = dma_alloc_coherent(adev->dev.parent,
 							   unic_dev->caps.vport_buf_size,
-							   &unic_dev->vbuf[i].dma_addr, GFP_KERNEL);
+							   &unic_dev->vbuf[i].dma_addr,
+							   unic_dev->gfp);
 		if (!unic_dev->vbuf[i].buf) {
 			dev_err(adev->dev.parent,
 				"failed to alloc vport buffer.\n");
@@ -798,8 +756,8 @@ static int unic_init_vport_buf(struct unic_dev *unic_dev)
 
 	if (unic_dev->caps.vport_buf_num > UNIC_MAX_VPORT_BUF_NUM) {
 		dev_err(adev->dev.parent,
-			"vport_buf_num exceeded the maximum(%d).\n",
-			UNIC_MAX_VPORT_BUF_NUM);
+			"vport_buf_num(%hhu) exceeded the maximum(%d).\n",
+			unic_dev->caps.vport_buf_num, UNIC_MAX_VPORT_BUF_NUM);
 		return -EINVAL;
 	}
 
@@ -843,6 +801,7 @@ static int unic_init_vport(struct unic_dev *unic_dev)
 static void unic_uninit_vport(struct unic_dev *unic_dev)
 {
 	unic_uninit_ip_table(unic_dev);
+	unic_uninit_bond_ip_table(unic_dev);
 
 	if (unic_dev_eth_mac_supported(unic_dev)) {
 		unic_uninit_mac_table(unic_dev);
@@ -882,7 +841,10 @@ static int unic_init_netdev_priv(struct net_device *netdev,
 	priv->comdev.adev = adev;
 	priv->msg_enable = netif_msg_init(netif_debug, DEFAULT_MSG_LEVEL);
 	priv->tid = ubase_get_dev_caps(adev)->tid;
+	priv->hw_ver = ubase_get_hw_ver(adev);
 	mutex_init(&priv->act_info.mutex);
+	mutex_init(&priv->bond_status.mutex);
+	mutex_init(&priv->stats.bond_record.lock);
 
 	ret = unic_query_dev_res(priv);
 	if (ret)
@@ -930,6 +892,8 @@ unic_unint_mac:
 err_uninit_vport:
 	unic_uninit_vport(priv);
 destroy_lock:
+	mutex_destroy(&priv->stats.bond_record.lock);
+	mutex_destroy(&priv->bond_status.mutex);
 	mutex_destroy(&priv->act_info.mutex);
 
 	return ret;
@@ -944,6 +908,8 @@ static void unic_uninit_netdev_priv(struct net_device *netdev)
 	unic_uninit_dev_addr(priv);
 	unic_uninit_mac(priv);
 	unic_uninit_vport(priv);
+	mutex_destroy(&priv->stats.bond_record.lock);
+	mutex_destroy(&priv->bond_status.mutex);
 	mutex_destroy(&priv->act_info.mutex);
 }
 
@@ -1038,14 +1004,14 @@ static struct net_device *unic_alloc_netdev(struct auxiliary_device *adev)
 		channel_num = UNIC_DEFAULT_CHANNEL_NUM;
 
 	if (ubase_adev_ubl_supported(adev)) {
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 		snprintf(name, IFNAMSIZ, "ublc%ud%ue%u", caps->chip_id,
 			 caps->die_id, caps->ue_id);
 		netdev = alloc_netdev_mq(sizeof(struct unic_dev), name,
 					 NET_NAME_USER, ubl_setup, channel_num);
 #else
 		dev_warn(adev->dev.parent,
-			 "failed to alloc netdev because of ubl macro is not enabled.\n");
+			 "failed to alloc netdev because of CONFIG_UB_UNIC_UBL is not enabled.\n");
 #endif
 	} else {
 		snprintf(name, IFNAMSIZ, "ethc%ud%ue%u", caps->chip_id,
@@ -1093,11 +1059,20 @@ int unic_dev_init(struct auxiliary_device *adev)
 		goto err_unregister_event;
 	}
 
-	unic_query_ip_addr(adev);
+	ret = unic_query_ip_addr(adev);
+	if (ret) {
+		if (ret == -ETIMEDOUT)
+			ubase_update_adev_status(adev, UBASE_ADEV_PROBE_FAIL);
+
+		goto err_unregister_netdev;
+	}
+
 	unic_start_dev_period_task(netdev);
 
 	return 0;
 
+err_unregister_netdev:
+	unregister_netdev(netdev);
 err_unregister_event:
 	unic_unregister_event(adev);
 err_uninit_netdev_priv:
@@ -1107,10 +1082,31 @@ err_free_netdev:
 	return ret;
 }
 
-void unic_dev_uninit(struct auxiliary_device *adev)
+static void unic_uninit_netdev(struct auxiliary_device *adev)
 {
 	struct unic_dev *priv = (struct unic_dev *)dev_get_drvdata(&adev->dev);
 	struct net_device *netdev = priv->comdev.netdev;
+
+	if (netdev->reg_state != NETREG_UNINITIALIZED) {
+		if (ubase_adev_shutting_down(adev)) {
+			rtnl_lock();
+			netif_device_detach(netdev);
+			dev_close(netdev);
+			rtnl_unlock();
+		} else {
+			unregister_netdev(netdev);
+		}
+	}
+
+	unic_uninit_netdev_priv(netdev);
+
+	if (!ubase_adev_shutting_down(adev))
+		free_netdev(netdev);
+}
+
+void unic_dev_uninit(struct auxiliary_device *adev)
+{
+	struct unic_dev *priv = (struct unic_dev *)dev_get_drvdata(&adev->dev);
 	struct unic_promisc_en promisc_en = {0};
 
 	/* cancel service task and wait it finish before release resources. */
@@ -1125,12 +1121,7 @@ void unic_dev_uninit(struct auxiliary_device *adev)
 	/* Explicitly disable promisc to avoid hardware promisc residue */
 	unic_set_promisc_mode(priv, &promisc_en);
 
-	if (netdev->reg_state != NETREG_UNINITIALIZED)
-		unregister_netdev(netdev);
-
-	unic_uninit_netdev_priv(netdev);
-
-	free_netdev(netdev);
+	unic_uninit_netdev(adev);
 
 	dev_set_drvdata(&adev->dev, NULL);
 }

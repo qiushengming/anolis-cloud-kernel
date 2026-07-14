@@ -7,9 +7,10 @@
 #ifndef __UBASE_HW_H__
 #define __UBASE_HW_H__
 
-#include <ub/ubase/ubase_comm_hw.h>
+#include <ub/ubase/ubase_comm_mbx.h>
 
 #include "ubase_cmd.h"
+#include "ubase_dev.h"
 
 #define UBASE_CTX_REMOVE_ALL		(-2)
 
@@ -32,7 +33,8 @@ struct ubase_res_cmd_resp {
 	__le32	cap_bits[UBASE_CAP_LEN];
 	__le32	rsvd0[3];
 
-	u8	rsvd1[2];
+	u8	node_type;
+	u8	rsvd1;
 	__le16	ceq_vector_num;
 	__le16	aeq_vector_num;
 	__le16	misc_vector_num;
@@ -126,7 +128,7 @@ struct ubase_cfg_dma_buf_req {
 	__le32 resv[3];
 };
 
-struct ubase_config_sl_vl_cmd {
+struct ubase_query_sl_vl_cmd {
 	u8	sl_num;
 	u8	sl_vl[23];
 };
@@ -156,6 +158,7 @@ int ubase_hw_init(struct ubase_dev *udev);
 void ubase_hw_uninit(struct ubase_dev *udev);
 int ubase_query_sl_vl_map(struct ubase_dev *udev, u8 *sl_vl);
 int ubase_qos_init(struct ubase_dev *udev);
+void ubase_qos_uninit(struct ubase_dev *udev);
 int ubase_query_ets_tc(struct ubase_dev *udev, u32 port_bitmap,
 		       u16 vl_bitmap, struct ubase_cfg_ets_vl_sch_cmd *resp);
 int ubase_query_ets_tcg(struct ubase_dev *udev,
@@ -182,7 +185,13 @@ int ubase_query_fst_fvt_rqmt(struct ubase_dev *udev,
 			     struct ubase_query_fst_fvt_rqmt_cmd *resp,
 			     u16 bus_ue_id);
 int ubase_query_port_bitmap(struct ubase_dev *udev);
-int __ubase_perf_stats(struct ubase_dev *udev, u64 port_bitmap, u32 period,
-		       struct ubase_perf_stats_result *data, u32 data_size);
+int __ubase_cmd_ctx_buf_alloc(struct ubase_dev *udev,
+			      struct ubase_ctx_buf_cap *ctx_buf,
+			      struct ubase_mbx_attr *attr);
+void __ubase_cmd_ctx_buf_free(struct ubase_dev *udev,
+			      struct ubase_ctx_buf_cap *ctx_buf);
+int ubase_config_ctx_buf_to_hw(struct ubase_dev *udev,
+			       struct ubase_ctx_buf_cap *ctx_buf,
+			       struct ubase_mbx_attr *attr);
 
-#endif
+#endif /* __UBASE_HW_H__ */

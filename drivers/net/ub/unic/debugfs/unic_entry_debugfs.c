@@ -7,6 +7,7 @@
 #include <net/page_pool/types.h>
 #include <linux/debugfs.h>
 
+#include "unic_bond.h"
 #include "unic_comm_addr.h"
 #include "unic_dev.h"
 #include "unic_debugfs.h"
@@ -153,6 +154,33 @@ int unic_dbg_dump_ip_tbl_list(struct seq_file *s, void *data)
 	return 0;
 }
 
+int unic_dbg_dump_bond_ip_tbl_list(struct seq_file *s, void *data)
+{
+	struct unic_dev *unic_dev = dev_get_drvdata(s->private);
+	struct unic_comm_addr_node *ip_node;
+	struct unic_addr_tbl *ip_tbl;
+	struct list_head *list;
+	u16 i = 0;
+
+	if (!unic_bond_ip_sync_supported(unic_dev))
+		return -EOPNOTSUPP;
+
+	seq_printf(s, "No  %-43sSTATE    IP_MASK\n", "IP_ADDR");
+
+	ip_tbl = &unic_dev->vport.addr_tbl;
+	list = &ip_tbl->bond_ip_list;
+	spin_lock_bh(&ip_tbl->bond_ip_list_lock);
+	list_for_each_entry(ip_node, list, node) {
+		seq_printf(s, "%-4u", i++);
+		seq_printf(s, "%-43pI6c", &ip_node->ip_addr.s6_addr);
+		seq_printf(s, "%-9s", unic_entry_state_str[ip_node->state]);
+		seq_printf(s, "%-3u\n", ip_node->node_mask);
+	}
+	spin_unlock_bh(&ip_tbl->bond_ip_list_lock);
+
+	return 0;
+}
+
 static int unic_query_mac_list_hw(struct unic_dev *unic_dev, u32 *mac_idx,
 				  struct list_head *list, bool *complete)
 {
@@ -185,7 +213,8 @@ static int unic_query_mac_list_hw(struct unic_dev *unic_dev, u32 *mac_idx,
 	if (head->cur_mac_cnt > UNIC_DBG_MAC_NUM) {
 		ret = -EINVAL;
 		unic_err(unic_dev,
-			 "invalid cur_mac_cnt(%u).\n", head->cur_mac_cnt);
+			 "invalid cur_mac_cnt = %u out of range [0, %d].\n",
+			 head->cur_mac_cnt, UNIC_DBG_MAC_NUM);
 		goto err_out;
 	}
 
@@ -254,6 +283,119 @@ release_list:
 	return ret;
 }
 
+static int unic_query_mng_list_hw(struct unic_dev *unic_dev, u32 *mng_idx,
+				  struct list_head *list, bool *complete)
+{
+	struct unic_dbg_mng_entry *mng_entry;
+	struct unic_dbg_mng_node *mng_node;
+	struct unic_dbg_mng_head req = {0};
+	struct unic_dbg_mng_head *head;
+	struct ubase_cmd_buf in, out;
+	int ret;
+	u8 i;
+
+	head = kzalloc(UNIC_QUERY_MNG_LEN, GFP_KERNEL);
+	if (!head)
+		return -ENOMEM;
+
+	mng_entry = head->entries;
+	req.idx = cpu_to_le16((u16)*mng_idx);
+
+	ubase_fill_inout_buf(&in, UBASE_OPC_QUERY_MNG_TBL, true, sizeof(req),
+			     &req);
+	ubase_fill_inout_buf(&out, UBASE_OPC_QUERY_MNG_TBL, true,
+			     UNIC_QUERY_MNG_LEN, head);
+	ret = ubase_cmd_send_inout(unic_dev->comdev.adev, &in, &out);
+	if (ret) {
+		unic_err(unic_dev,
+			 "failed to query mng hw tbl, ret = %d.\n", ret);
+		goto err_out;
+	}
+
+	if (head->entry_num > UNIC_DBG_MNG_NUM) {
+		ret = -EINVAL;
+		unic_err(unic_dev,
+			 "invalid entry_num = %u out of range is [0, %d].\n",
+			 head->entry_num, UNIC_DBG_MNG_NUM);
+		goto err_out;
+	}
+
+	for (i = 0; i < head->entry_num; i++) {
+		mng_node = kzalloc(sizeof(*mng_node), GFP_KERNEL);
+		if (!mng_node) {
+			ret = -ENOMEM;
+			goto err_out;
+		}
+		memcpy(&mng_node->mac, &mng_entry[i].mac,
+		       sizeof(mng_node->mac));
+		mng_node->mac_mask = mng_entry[i].mac_mask;
+		mng_node->vlan = le16_to_cpu(mng_entry[i].vlan);
+		mng_node->vlan_mask = mng_entry[i].vlan_mask;
+		mng_node->ether_type = le16_to_cpu(mng_entry[i].ether_type);
+		mng_node->ether_type_mask = mng_entry[i].ether_type_mask;
+		mng_node->port_bitmap = mng_entry[i].port_bitmap;
+		mng_node->drop = mng_entry[i].drop;
+		mng_node->jfrn = le16_to_cpu(mng_entry[i].jfrn);
+		list_add_tail(&mng_node->node, list);
+	}
+
+	*complete = head->entry_num < UNIC_DBG_MNG_NUM;
+
+	*mng_idx = le32_to_cpu(head->idx);
+
+err_out:
+	kfree(head);
+
+	return ret;
+}
+
+int unic_dbg_dump_mng_tbl_list_hw(struct seq_file *s, void *data)
+{
+	struct unic_dev *unic_dev = dev_get_drvdata(s->private);
+	struct unic_dbg_mng_node *mng_node, *next_node;
+	struct unic_caps *caps = &unic_dev->caps;
+	u32 size = caps->mng_tbl_size;
+	struct list_head list;
+	int ret, cnt = 0;
+
+	ret = unic_dbg_check_dev_state(unic_dev);
+	if (ret)
+		return ret;
+
+	if (!unic_dev_cfg_mac_supported(unic_dev))
+		return -EOPNOTSUPP;
+
+	INIT_LIST_HEAD(&list);
+	ret = unic_common_query_addr_list(unic_dev, size,
+					  UNIC_DBG_MNG_NUM, &list,
+					  unic_query_mng_list_hw);
+	if (ret)
+		goto release_list;
+
+	seq_printf(s, "No %-18smac_mask vlan vlan_mask ether_type ether_type_mask port_bitmap drop jfrn\n",
+		   "mac");
+	list_for_each_entry(mng_node, &list, node) {
+		seq_printf(s, "%-3d", cnt++);
+		seq_printf(s, "%-18pM", mng_node->mac);
+		seq_printf(s, "%-9u", mng_node->mac_mask);
+		seq_printf(s, "%-5u", mng_node->vlan);
+		seq_printf(s, "%-10u", mng_node->vlan_mask);
+		seq_printf(s, "%-11u", mng_node->ether_type);
+		seq_printf(s, "%-16u", mng_node->ether_type_mask);
+		seq_printf(s, "0x%-10x", mng_node->port_bitmap);
+		seq_printf(s, "%-5u", mng_node->drop);
+		seq_printf(s, "%u\n", mng_node->jfrn);
+	}
+
+release_list:
+	list_for_each_entry_safe(mng_node, next_node, &list, node) {
+		list_del(&mng_node->node);
+		kfree(mng_node);
+	}
+
+	return ret;
+}
+
 static int unic_query_vlan_list_hw(struct unic_dev *unic_dev, u32 *idx,
 				   struct list_head *list, bool *complete)
 {
@@ -286,7 +428,9 @@ static int unic_query_vlan_list_hw(struct unic_dev *unic_dev, u32 *idx,
 	vlan_cnt = le16_to_cpu(resp->vlan_cnt);
 	if (vlan_cnt > UNIC_DBG_VLAN_NUM) {
 		ret = -EINVAL;
-		unic_err(unic_dev, "invalid vlan_cnt(%u).\n", vlan_cnt);
+		unic_err(unic_dev,
+			 "invalid vlan_cnt = %u out of range [0, %d].\n",
+			 vlan_cnt, UNIC_DBG_VLAN_NUM);
 		goto err_out;
 	}
 
@@ -332,7 +476,7 @@ int unic_dbg_dump_vlan_tbl_list_hw(struct seq_file *s, void *data)
 
 	list_for_each_entry(vlan_node, &list, node) {
 		seq_printf(s, "%-7d", cnt++);
-		seq_printf(s, "%-13u", vlan_node->ue_id);
+		seq_printf(s, "%-9u", vlan_node->ue_id);
 		seq_printf(s, "%-12u\n", vlan_node->vlan_id);
 	}
 

@@ -182,19 +182,17 @@ enum unic_vl_map_type {
 	UNIC_DSCP_VL_MAP,
 };
 
+struct unic_config_prio_tc_cmd {
+	u8 prio_vl[UNIC_MAX_PRIO_NUM];
+	u8 rsv[16];
+};
+
 struct unic_config_vl_map_cmd {
 	u8 map_type;
 	u8 resv0[3];
 	u8 prio_vl[UNIC_MAX_PRIO_NUM];
 	u8 dscp_vl[UBASE_MAX_DSCP];
 	u8 resv1[12];
-};
-
-struct unic_config_vl_speed_cmd {
-	u8 resv0[2];
-	__le16 vl_bitmap;
-	__le32 max_speed[UBASE_MAX_VL_NUM];
-	u8 resv1[20];
 };
 
 enum unic_lb_en_sub_cmd {
@@ -232,4 +230,4 @@ struct unic_query_link_diagnosis_resp {
 	u8 rsv[20];
 };
 
-#endif
+#endif /* __UNIC_CMD_H__ */

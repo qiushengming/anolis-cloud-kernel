@@ -26,6 +26,8 @@ static int unic_dbg_dump_dev_info(struct seq_file *s, void *data)
 
 	seq_printf(s, "%-25s", "DEV_NAME:");
 	seq_printf(s, "%-12s\n", netdev->name);
+	seq_printf(s, "%-25s", "unic_dev state:");
+	seq_printf(s, "0x%lx\n", unic_dev->state);
 
 	if (!unic_dev_ubl_supported(unic_dev)) {
 		ret = unic_check_validate_dump_mtu(unic_dev, netdev->mtu,
@@ -98,22 +100,22 @@ static const struct unic_dbg_cap_bit_info {
 	const char *format;
 	bool (*get_bit)(struct unic_dev *dev);
 } unic_cap_bits[] = {
-	{"\tsupport_ubl: %u\n", &unic_dev_ubl_supported},
-	{"\tsupport_pfc: %u\n", &unic_dev_pfc_supported},
-	{"\tsupport_ets: %u\n", &unic_dev_ets_supported},
-	{"\tsupport_fec: %u\n", &unic_dev_fec_supported},
-	{"\tsupport_pause: %u\n", &unic_dev_pause_supported},
-	{"\tsupport_eth: %u\n", &unic_dev_eth_supported},
-	{"\tsupport_tc_speed_limit: %u\n", &unic_dev_tc_speed_limit_supported},
-	{"\tsupport_tx_csum_offload: %u\n", &unic_dev_tx_csum_offload_supported},
-	{"\tsupport_rx_csum_offload: %u\n", &unic_dev_rx_csum_offload_supported},
-	{"\tsupport_app_lb: %u\n", &unic_dev_app_lb_supported},
-	{"\tsupport_external_lb: %u\n", &unic_dev_external_lb_supported},
-	{"\tsupport_serial_serdes_lb: %u\n", &unic_dev_serial_serdes_lb_supported},
-	{"\tsupport_parallel_serdes_lb: %u\n", &unic_dev_parallel_serdes_lb_supported},
-	{"\tsupport_fec_stats: %u\n", &unic_dev_fec_stats_supported},
-	{"\tsupport_cfg_mac: %u\n", &unic_dev_cfg_mac_supported},
-	{"\tsupport_cfg_vlan_filter: %u\n", &unic_dev_cfg_vlan_filter_supported},
+	{"\tsupport_ubl: %u\n", unic_dev_ubl_supported},
+	{"\tsupport_pfc: %u\n", unic_dev_pfc_supported},
+	{"\tsupport_ets: %u\n", unic_dev_ets_supported},
+	{"\tsupport_fec: %u\n", unic_dev_fec_supported},
+	{"\tsupport_pause: %u\n", unic_dev_pause_supported},
+	{"\tsupport_eth: %u\n", unic_dev_eth_supported},
+	{"\tsupport_tc_speed_limit: %u\n", unic_dev_tc_speed_limit_supported},
+	{"\tsupport_tx_csum_offload: %u\n", unic_dev_tx_csum_offload_supported},
+	{"\tsupport_rx_csum_offload: %u\n", unic_dev_rx_csum_offload_supported},
+	{"\tsupport_app_lb: %u\n", unic_dev_app_lb_supported},
+	{"\tsupport_external_lb: %u\n", unic_dev_external_lb_supported},
+	{"\tsupport_serial_serdes_lb: %u\n", unic_dev_serial_serdes_lb_supported},
+	{"\tsupport_parallel_serdes_lb: %u\n", unic_dev_parallel_serdes_lb_supported},
+	{"\tsupport_fec_stats: %u\n", unic_dev_fec_stats_supported},
+	{"\tsupport_cfg_mac: %u\n", unic_dev_cfg_mac_supported},
+	{"\tsupport_cfg_vlan_filter: %u\n", unic_dev_cfg_vlan_filter_supported},
 };
 
 static void unic_dbg_dump_caps_bits(struct unic_dev *unic_dev,
@@ -226,7 +228,7 @@ static int unic_dbg_dump_rss_cfg_hw(struct seq_file *s, void *data)
 	if (ret)
 		return ret;
 
-	seq_printf(s, "%-10u", resp.tc_vaild);
+	seq_printf(s, "%-10u", resp.tc_valid);
 	seq_printf(s, "%-9u", resp.tc_mode);
 	jfr_cnt = min(le16_to_cpu(resp.jfr_reg_num), UNIC_RSS_MAX_CNT);
 	jfr_cnt = min(UNIC_RSS_CFG_ITEMS_NUM, jfr_cnt);
@@ -301,6 +303,56 @@ static int unic_dbg_query_link_record(struct seq_file *s, void *data)
 	return 0;
 }
 
+static int unic_dbg_query_bond_record(struct seq_file *s, void *data)
+{
+	struct unic_dev *unic_dev = dev_get_drvdata(s->private);
+	struct unic_bond_stats *record = &unic_dev->stats.bond_record;
+	u8 cnt = 1, stats_cnt, cur_status, last_notify_status;
+	u64 total, idx;
+
+	mutex_lock(&unic_dev->bond_status.mutex);
+	cur_status = unic_dev->bond_status.cur_status;
+	last_notify_status = unic_dev->bond_status.last_notify_status;
+	mutex_unlock(&unic_dev->bond_status.mutex);
+
+	mutex_lock(&record->lock);
+
+	total = record->tx_enabled_cnt + record->tx_disabled_cnt;
+	if (!total) {
+		seq_puts(s, "bond change records : NA\n");
+		mutex_unlock(&record->lock);
+
+		return 0;
+	}
+
+	seq_puts(s, "current time        : ");
+	(void)ubase_dbg_format_time(ktime_get_real_seconds(), s);
+	seq_printf(s, "\ncurrent bond status : %s\n", cur_status ?
+		   "TX ENABLED" : "TX DISABLED");
+	seq_printf(s, "last notify status  : %s\n", last_notify_status ?
+		   "ADD" : "DEL");
+	seq_printf(s, "tx_enabled count    : %llu\n", record->tx_enabled_cnt);
+	seq_printf(s, "tx_disabled count   : %llu\n", record->tx_disabled_cnt);
+	seq_puts(s, "bond change records :\n");
+	seq_puts(s, "\tNo.\tTIME\t\t\t\tSTATUS\n");
+
+	stats_cnt = min(total, BOND_STAT_MAX_IDX);
+	while (cnt <= stats_cnt) {
+		total--;
+		idx = total % BOND_STAT_MAX_IDX;
+		seq_printf(s, "\t%-2d\t", cnt);
+		(void)ubase_dbg_format_time(record->stats[idx].bond_tv_sec, s);
+		seq_printf(s, "\t%s\n",
+			   record->stats[idx].bond_status ?
+			   "TX ENABLED" : "TX DISABLED");
+		cnt++;
+	}
+
+	mutex_unlock(&record->lock);
+
+	return 0;
+}
+
 static int unic_dbg_clear_link_record(struct seq_file *s, void *data)
 {
 	struct unic_dev *unic_dev = dev_get_drvdata(s->private);
@@ -317,11 +369,84 @@ static int unic_dbg_clear_link_record(struct seq_file *s, void *data)
 	return 0;
 }
 
+static int unic_dbg_clear_bond_record(struct seq_file *s, void *data)
+{
+	struct unic_dev *unic_dev = dev_get_drvdata(s->private);
+	struct unic_bond_stats *record = &unic_dev->stats.bond_record;
+
+	mutex_lock(&record->lock);
+	record->tx_enabled_cnt = 0;
+	record->tx_disabled_cnt = 0;
+	memset(record->stats, 0, sizeof(record->stats));
+	mutex_unlock(&record->lock);
+
+	seq_puts(s, "Bond status records have been cleared!\n");
+
+	return 0;
+}
+
+static int unic_dbg_dump_abnormal_cqe_cnt(struct seq_file *s, void *data)
+{
+	struct unic_dev *unic_dev = dev_get_drvdata(s->private);
+	static const char * const status_labels[] = {
+		"STATUS_0:   ",
+		"STATUS_1:   ",
+		"STATUS_2:   ",
+		"STATUS_3:   ",
+		"STATUS_4:   ",
+		"STATUS_5:   ",
+		"STATUS_6:   ",
+		"OTHERS:     "
+	};
+	struct unic_channel *c;
+	int i, j, k, ret = 0;
+
+	if (!mutex_trylock(&unic_dev->channels.mutex))
+		return -EBUSY;
+
+	if (__unic_resetting(unic_dev) || !unic_dev->channels.c) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	for (i = 0; i < unic_dev->channels.num; i++) {
+		c = &unic_dev->channels.c[i];
+		seq_printf(s, "txq%d:\n", i);
+		seq_printf(s, "TOTAL_ABN_CQE_COUNT:%-20llu\n", c->sq->stats.abn_cqe_total_cnt);
+		seq_printf(s, "%-12s%20s%20s%20s%20s%20s%20s\n", "", "SUB_0",
+			   "SUB_1", "SUB_2", "SUB_3", "SUB_4", "OTHERS");
+
+		for (j = 0; j < UNIC_CQE_STATUS_MAX; j++) {
+			seq_printf(s, "%s", status_labels[j]);
+			for (k = 0; k < UNIC_CQE_SUB_STATUS_MAX; k++)
+				seq_printf(s, "%20llu", c->sq->stats.abn_cqe_cnt[j][k]);
+
+			seq_puts(s, "\n");
+		}
+		seq_puts(s, "\n");
+	}
+
+out:
+	mutex_unlock(&unic_dev->channels.mutex);
+
+	return ret;
+}
+
 static bool unic_dbg_dentry_support(struct device *dev, u32 property)
 {
 	struct unic_dev *unic_dev = dev_get_drvdata(dev);
 
 	return ubase_dbg_dentry_support(unic_dev->comdev.adev, property);
+}
+
+static bool unic_dbg_abn_cqe_support(struct device *dev, u32 property)
+{
+	struct unic_dev *unic_dev = dev_get_drvdata(dev);
+
+	if (!unic_abn_cqe_count_support(unic_dev))
+		return false;
+
+	return unic_dbg_dentry_support(dev, property);
 }
 
 static struct ubase_dbg_dentry_info unic_dbg_dentry[] = {
@@ -374,6 +499,13 @@ static struct ubase_dbg_cmd_info unic_dbg_cmd[] = {
 		.init = ubase_dbg_seq_file_init,
 		.read_func = unic_dbg_dump_ip_tbl_list,
 	}, {
+		.name = "bond_ip_tbl_list",
+		.dentry_index = UNIC_DBG_DENTRY_IP,
+		.property = UBASE_SUP_UNIC | UBASE_SUP_ETH,
+		.support = unic_dbg_dentry_support,
+		.init = ubase_dbg_seq_file_init,
+		.read_func = unic_dbg_dump_bond_ip_tbl_list,
+	}, {
 		.name = "uc_mac_tbl_list",
 		.dentry_index = UNIC_DBG_DENTRY_MAC,
 		.property = UBASE_SUP_UNIC | UBASE_SUP_ETH,
@@ -423,6 +555,13 @@ static struct ubase_dbg_cmd_info unic_dbg_cmd[] = {
 		.init = ubase_dbg_seq_file_init,
 		.read_func = unic_dbg_dump_rq_jfc_ctx_sw,
 	}, {
+		.name = "sq_rq_cq_info",
+		.dentry_index = UNIC_DBG_DENTRY_CONTEXT,
+		.property = UBASE_SUP_UNIC | UBASE_SUP_UBL_ETH,
+		.support = unic_dbg_dentry_support,
+		.init = ubase_dbg_seq_file_init,
+		.read_func = unic_dbg_dump_sq_rq_cq_info,
+	}, {
 		.name = "dev_info",
 		.dentry_index = UNIC_DBG_DENTRY_ROOT,
 		.property = UBASE_SUP_UNIC | UBASE_SUP_UBL_ETH,
@@ -457,6 +596,13 @@ static struct ubase_dbg_cmd_info unic_dbg_cmd[] = {
 		.support = unic_dbg_dentry_support,
 		.init = ubase_dbg_seq_file_init,
 		.read_func = unic_dbg_dump_mac_tbl_list_hw,
+	}, {
+		.name = "mng_tbl_list_hw",
+		.dentry_index = UNIC_DBG_DENTRY_MAC,
+		.property = UBASE_SUP_UNIC | UBASE_SUP_ETH,
+		.support = unic_dbg_dentry_support,
+		.init = ubase_dbg_seq_file_init,
+		.read_func = unic_dbg_dump_mng_tbl_list_hw,
 	}, {
 		.name = "vlan_tbl_list_hw",
 		.dentry_index = UNIC_DBG_DENTRY_VLAN,
@@ -556,12 +702,33 @@ static struct ubase_dbg_cmd_info unic_dbg_cmd[] = {
 		.init = ubase_dbg_seq_file_init,
 		.read_func = unic_dbg_query_link_record,
 	}, {
+		.name = "bond_status_record",
+		.dentry_index = UNIC_DBG_DENTRY_ROOT,
+		.property = UBASE_SUP_UNIC | UBASE_SUP_ETH,
+		.support = unic_dbg_dentry_support,
+		.init = ubase_dbg_seq_file_init,
+		.read_func = unic_dbg_query_bond_record,
+	}, {
 		.name = "clear_link_status_record",
 		.dentry_index = UNIC_DBG_DENTRY_ROOT,
 		.property = UBASE_SUP_UNIC | UBASE_SUP_UBL_ETH,
 		.support = unic_dbg_dentry_support,
 		.init = ubase_dbg_seq_file_init,
 		.read_func = unic_dbg_clear_link_record,
+	}, {
+		.name = "clear_bond_status_record",
+		.dentry_index = UNIC_DBG_DENTRY_ROOT,
+		.property = UBASE_SUP_UNIC | UBASE_SUP_ETH,
+		.support = unic_dbg_dentry_support,
+		.init = ubase_dbg_seq_file_init,
+		.read_func = unic_dbg_clear_bond_record,
+	}, {
+		.name = "abnormal_cqe_cnt",
+		.dentry_index = UNIC_DBG_DENTRY_ROOT,
+		.property = UBASE_SUP_UNIC | UBASE_SUP_UBL_ETH,
+		.support = unic_dbg_abn_cqe_support,
+		.init = ubase_dbg_seq_file_init,
+		.read_func = unic_dbg_dump_abnormal_cqe_cnt,
 	}
 };
 
@@ -577,7 +744,7 @@ int unic_dbg_init(struct auxiliary_device *adev)
 	unic_dev = (struct unic_dev *)dev_get_drvdata(dev);
 
 	if (!ubase_root_dentry) {
-		unic_err(unic_dev, "dbgfs root dentry does not exist.\n");
+		unic_err(unic_dev, "debugfs root dentry does not exist.\n");
 		return -ENOENT;
 	}
 

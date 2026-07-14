@@ -82,7 +82,7 @@ struct unic_rq_stats {
 	u64 alloc_frag_err;
 };
 
-struct  unic_jfr_ctx {
+struct unic_jfr_ctx {
 	/* DW0 */
 	u32 state : 2;
 	u32 limit_wl : 2;
@@ -175,4 +175,4 @@ int unic_poll_rx(struct unic_channel *c, int budget,
 void unic_clear_rq(struct unic_rq *rq);
 void unic_send_skb_to_stack(struct unic_channel *c, struct sk_buff *skb);
 
-#endif
+#endif /* __UNIC_RX_H__ */

@@ -9,6 +9,7 @@
 #include "ubase_cmd.h"
 #include "ubase_arq.h"
 #include "ubase_hw.h"
+#include "ubase_mailbox.h"
 
 /* When use tracepoint, must define "CREATE_TRACE_POINTS" before include the
  * trace header file.
@@ -18,23 +19,21 @@
 #define CREATE_TRACE_POINTS
 #include "ubase_trace.h"
 
-static int ubase_alloc_cmd_queue(struct ubase_dev *udev,
-				 struct ubase_cmdq_ring *ring)
+static inline int ubase_alloc_cmd_queue(struct ubase_dev *udev,
+					struct ubase_cmdq_ring *ring)
 {
 	size_t size = ring->desc_num * sizeof(struct ubase_cmdq_desc);
 
 	ring->desc = dma_alloc_coherent(udev->dev, size, &ring->desc_dma_addr,
 					GFP_KERNEL);
-	if (!ring->desc) {
-		ubase_err(udev, "failed to alloc cmdq dma addr.\n");
+	if (!ring->desc)
 		return -ENOMEM;
-	}
 
 	return 0;
 }
 
-static void ubase_free_cmd_queue(struct ubase_dev *udev,
-				 struct ubase_cmdq_ring *ring)
+static inline void ubase_free_cmd_queue(struct ubase_dev *udev,
+					struct ubase_cmdq_ring *ring)
 {
 	size_t size = ring->desc_num * sizeof(struct ubase_cmdq_desc);
 
@@ -191,9 +190,26 @@ static bool ubase_wait_for_resp(struct ubase_dev *udev)
 	return false;
 }
 
+static inline bool ubase_peer_cmdq_unready(u16 ret)
+{
+	return ret == ENXIO;
+}
+
+static bool ubase_is_cmdq_e2e_msg(struct ubase_dev *udev,
+				  struct ubase_cmdq_desc *desc)
+{
+	struct ubase_ue2ue_ctrlq_head *ue2ue_head =
+		(struct ubase_ue2ue_ctrlq_head *)desc->data;
+	u16 opcode = le16_to_cpu(desc->opcode);
+
+	return !ubase_dev_ctrlq_supported(udev) &&
+	       opcode == UBASE_OPC_UE2UE_UBASE &&
+	       ue2ue_head->head.sub_cmd == UBASE_UE2UE_CTRLQ_MSG;
+}
+
 static int ubase_get_cmd_result(struct ubase_dev *udev,
 				struct ubase_cmdq_desc *desc,
-				int num, u32 sw_pi)
+				int num, u32 sw_pi, bool *is_unready)
 {
 	struct ubase_cmdq_ring *csq = &udev->hw.cmdq.csq;
 	u32 pi = sw_pi;
@@ -208,10 +224,22 @@ static int ubase_get_cmd_result(struct ubase_dev *udev,
 			pi = 0;
 	}
 
-	if (desc->flag & UBASE_CMD_FLAG_OUT)
+	if (desc->flag & UBASE_CMD_FLAG_OUT) {
 		ret = le16_to_cpu(desc->ret);
-	else
+		/*
+		 * If the MUE's cmdq is not ready, the E2E message sent by the
+		 * UE will fail, and the firmware returns error code ENXIO.
+		 * In this case, change the error code to ETIMEDOUT so that the
+		 * UE can retry during the ELR or probe process.
+		 */
+		if (ubase_peer_cmdq_unready(ret) &&
+		    ubase_is_cmdq_e2e_msg(udev, desc)) {
+			*is_unready = true;
+			ret = ETIMEDOUT;
+		}
+	} else {
 		ret = ETIMEDOUT;
+	}
 
 	return -ret;
 }
@@ -240,7 +268,7 @@ static int ubase_csq_clean(struct ubase_dev *udev)
 	if (!ubase_csq_data_is_valid(udev, hw_ci)) {
 		ubase_warn(udev,
 			   "the cmd head is incorrect! cmd head = (%lld, %u-%u).\n",
-			 hw_ci, csq->pi, csq->ci);
+			   hw_ci, csq->pi, csq->ci);
 		ubase_warn(udev,
 			   "any further commands to the firmware are disabled!\n");
 		set_bit(UBASE_STATE_CMD_DISABLE, &udev->hw.state);
@@ -261,22 +289,28 @@ int ubase_send_cmd(struct ubase_dev *udev,
 {
 	struct ubase_cmdq_ring *csq = &udev->hw.cmdq.csq;
 	bool is_completed = false;
-	int cleaned;
+	bool is_unready = false;
+	int cleaned, free_num;
 	u32 sw_pi;
 	int ret;
 
 	spin_lock_bh(&csq->lock);
+	atomic_inc(&udev->hw.cmdq.csq_cnt);
 	if (test_bit(UBASE_STATE_CMD_DISABLE, &udev->hw.state)) {
-		ret = -EBUSY;
-		goto err_unlock;
+		atomic_dec(&udev->hw.cmdq.csq_cnt);
+		spin_unlock_bh(&csq->lock);
+		return -EBUSY;
 	}
 
-	if (num > ubase_remain_cmdq_space(csq)) {
+	free_num = ubase_remain_cmdq_space(csq);
+	if (num > free_num) {
 		csq->ci = ubase_read_dev(&udev->hw, UBASE_CSQ_HEAD_REG);
-		ubase_warn(udev,
-			   "the requested space exceeds the remaining space.\n");
-		ret = -EBUSY;
-		goto err_unlock;
+		atomic_dec(&udev->hw.cmdq.csq_cnt);
+		spin_unlock_bh(&csq->lock);
+		ubase_warn_rl(udev, cmdq_space_insuffice,
+			      "the requested space(%d) exceeds the remaining space(%d), csq ci: %u.\n",
+			      num, free_num, csq->ci);
+		return -EBUSY;
 	}
 
 	/**
@@ -291,17 +325,22 @@ int ubase_send_cmd(struct ubase_dev *udev,
 		ret = -EBADE;
 		goto err_clr_cmdq;
 	}
-	ret = ubase_get_cmd_result(udev, desc, num, sw_pi);
+	ret = ubase_get_cmd_result(udev, desc, num, sw_pi, &is_unready);
 
 err_clr_cmdq:
 	cleaned = ubase_csq_clean(udev);
+
+	atomic_dec(&udev->hw.cmdq.csq_cnt);
+	spin_unlock_bh(&csq->lock);
+
 	if (cleaned < 0)
 		ret = cleaned;
 	else if (cleaned != num)
 		ubase_warn(udev,
 			   "cleaned %dBD, need to clean %dBD.\n", cleaned, num);
-err_unlock:
-	spin_unlock_bh(&csq->lock);
+
+	if (is_unready)
+		ubase_warn(udev, "peer cmdq is not ready.\n");
 
 	return ret;
 }
@@ -366,6 +405,8 @@ int ubase_cmd_init(struct ubase_dev *udev)
 
 	ubase_cmd_init_regs(udev);
 
+	atomic_set(&udev->hw.cmdq.csq_cnt, 0);
+
 	clear_bit(UBASE_STATE_CMD_DISABLE, &udev->hw.state);
 
 	ret = ubase_cmd_query_version(udev);
@@ -388,9 +429,12 @@ err_queue_init:
 
 void ubase_cmd_disable(struct ubase_dev *udev)
 {
+#define UBASE_CMDQ_CLEAN_WAIT_TIME	4
+
 	__ubase_cmd_disable(udev);
 	/* wait to ensure the firmware completes csq commands. */
-	msleep(UBASE_CMDQ_CLEAR_WAIT_TIME);
+	while (atomic_read(&udev->hw.cmdq.csq_cnt))
+		msleep(UBASE_CMDQ_CLEAN_WAIT_TIME);
 
 	ubase_cmd_uninit_regs(udev);
 }
@@ -457,8 +501,12 @@ static void ubase_cmd_setup_desc_by_inbuf(struct ubase_dev *udev,
 					  u16 num)
 {
 	ubase_cmd_setup_basic_desc(&desc[0], in->opcode, in->is_read, num);
-	if (in->data)
+	if (in->data) {
+		/* the size of the desc is the larger value between in and out.
+		 * the data_size is copied and filled into the subsequent desc.
+		 */
 		memcpy(desc->data, in->data, in->data_size);
+	}
 }
 
 static void ubase_cmd_setup_desc_by_outbuf(struct ubase_dev *udev,
@@ -593,7 +641,7 @@ static bool ubase_cmd_crq_empty(struct ubase_dev *udev, struct ubase_hw *hw)
 	return hw->cmdq.crq.pi == hw->cmdq.crq.ci;
 }
 
-void ubase_cmd_crq_handler(struct ubase_dev *udev)
+static void ubase_cmd_crq_handler(struct ubase_dev *udev)
 {
 	struct ubase_cmdq_ring *crq = &udev->hw.cmdq.crq;
 	u32 msg_data_len;
@@ -604,8 +652,8 @@ void ubase_cmd_crq_handler(struct ubase_dev *udev)
 
 	while (!ubase_cmd_crq_empty(udev, &udev->hw)) {
 		if (test_bit(UBASE_STATE_CMD_DISABLE, &udev->hw.state)) {
-			ubase_warn(udev,
-				   "command queue needs re-initializing.\n");
+			ubase_warn_rl(udev, cmdq_is_disable,
+				      "command queue needs re-initializing.\n");
 			return;
 		}
 
@@ -620,6 +668,7 @@ void ubase_cmd_crq_handler(struct ubase_dev *udev)
 				  "drop invalid crq message, opcode = 0x%x, bd_num = %u, flag = 0x%x.",
 				  opcode, bd_num, flag);
 			UBASE_MOVE_CRQ_RING_PTR(crq);
+			ubase_write_dev(&udev->hw, UBASE_CRQ_HEAD_REG, crq->ci);
 			continue;
 		}
 
@@ -632,9 +681,9 @@ void ubase_cmd_crq_handler(struct ubase_dev *udev)
 						msg_data_len);
 
 		ubase_free_bd_data(msg_data, bd_num);
+		ubase_write_dev(&udev->hw, UBASE_CRQ_HEAD_REG, crq->ci);
 	}
 
-	ubase_write_dev(&udev->hw, UBASE_CRQ_HEAD_REG, crq->ci);
 }
 
 void ubase_crq_service_task(struct ubase_delay_work *ubase_work)
@@ -661,22 +710,23 @@ void ubase_crq_service_task(struct ubase_delay_work *ubase_work)
 	clear_bit(UBASE_STATE_CRQ_HANDLING, &udev->service_task.state);
 }
 
-static bool ubase_cmd_is_mbx_avail(struct ubase_dev *udev)
-{
-	return true;
-}
-
 static int ubase_cmd_wait_mbx_completed(struct ubase_dev *udev,
 					union ubase_mbox *mbx)
 {
 	struct ubase_mbx_event_context *ctx = &udev->mb_cmd.ctx;
+	struct ubase_irq_table *irq_table = &udev->irq_table;
+	struct ubase_aeq *aeq = &irq_table->aeq;
 	int ret;
 
+	atomic_inc(&udev->mb_cmd.mbx_cnt);
+	complete(&aeq->poll);
 	if (!wait_for_completion_timeout(&ctx->done,
 					 msecs_to_jiffies(UBASE_CMDQ_MBX_TX_TIMEOUT))) {
-		ubase_err(udev,
-			  "cmd seq_num 0x%x mailbox cmd code 0x%x timeout.\n",
-			  ctx->seq_num, mbx->cmd);
+		ubase_err_rl(udev, mailbox_cmd_timeout,
+			     "cmd seq_num 0x%x mailbox cmd code 0x%x timeout.\n",
+			     ctx->seq_num, mbx->cmd);
+		atomic_dec(&udev->mb_cmd.mbx_cnt);
+		udev->mbx_stats.event_hw_timeout_cnt++;
 		return -EBUSY;
 	}
 
@@ -685,6 +735,8 @@ static int ubase_cmd_wait_mbx_completed(struct ubase_dev *udev,
 		ubase_err(udev,
 			  "cmd seq_num(0x%x) mailbox cmd code(0x%x) error, ret = %d.\n",
 			  ctx->seq_num, mbx->cmd, ret);
+
+	atomic_dec(&udev->mb_cmd.mbx_cnt);
 
 	return ret;
 }
@@ -697,10 +749,12 @@ static void ubase_setup_mbx_info(struct ubase_dev *udev, union ubase_mbox *mbx)
 
 int ubase_post_mailbox_by_event(struct ubase_dev *udev,
 				struct ubase_cmd_buf *in,
-				struct ubase_cmd_buf *out)
+				struct ubase_cmd_buf *out,
+				struct ubase_cmd_mailbox *mailbox)
 {
+	struct ubase_mbx_event_context *ctx = &udev->mb_cmd.ctx;
 	union ubase_mbox *mbx = (union ubase_mbox *)in->data;
-	unsigned long end;
+	unsigned long end, flags;
 	int ret;
 
 	if (!mbx) {
@@ -708,22 +762,56 @@ int ubase_post_mailbox_by_event(struct ubase_dev *udev,
 		return -EINVAL;
 	}
 
+	raw_spin_lock_irqsave(&udev->mb_cmd.mbx_lock, flags);
+	if (ctx->mbx_buff) {
+		raw_spin_unlock_irqrestore(&udev->mb_cmd.mbx_lock, flags);
+		udev->mbx_stats.buff_not_empty_cnt++;
+		ubase_err_rl(udev, mbx_buff_not_empty,
+			     "incomplete mailbox events exist, mbx stats: %llu, %llu, %llu, %llu, %llu, %llu, %llu, %llu\n",
+			     udev->mbx_stats.event_hw_cnt,
+			     udev->mbx_stats.cmd_timeout_cnt,
+			     udev->mbx_stats.event_hw_timeout_cnt,
+			     udev->mbx_stats.ae_cnt,
+			     udev->mbx_stats.seq_num_err_cnt,
+			     udev->mbx_stats.buff_cnt,
+			     udev->mbx_stats.buff_free_cnt,
+			     udev->mbx_stats.buff_not_empty_cnt);
+		return -EBUSY;
+	}
+
+	reinit_completion(&ctx->done);
 	ubase_setup_mbx_info(udev, mbx);
+	raw_spin_unlock_irqrestore(&udev->mb_cmd.mbx_lock, flags);
+
+	trace_ubase_alloc_mailbox_user(udev->dev, &mailbox->count, ctx->seq_num);
+	if (atomic_inc_not_zero(&mailbox->count)) {
+		ctx->mbx_buff = mailbox;
+		udev->mbx_stats.buff_cnt++;
+	}
+
+	trace_ubase_add_mailbox_count(udev->dev, &mailbox->count, ctx->seq_num);
 
 	end = msecs_to_jiffies(UBASE_CMDQ_MBX_TX_TIMEOUT) + jiffies;
-	while (ubase_cmd_is_mbx_avail(udev)) {
+	while (1) {
 		ret = __ubase_cmd_send_inout(udev, in, out);
 		if (!ret)
 			break;
 
 		if (time_after(jiffies, end)) {
-			dev_err_ratelimited(udev->dev,
-					    "failed to wait mbox.\n");
+			ubase_err_rl(udev, wait_mbox_fail,
+				     "failed to wait mbox, ret = %d.\n",
+				     ret);
+			udev->mbx_stats.cmd_timeout_cnt++;
+			raw_spin_lock_irqsave(&udev->mb_cmd.mbx_lock, flags);
+			ubase_mailbox_buff_free(udev);
+			raw_spin_unlock_irqrestore(&udev->mb_cmd.mbx_lock, flags);
 			return -ETIMEDOUT;
 		}
 
 		cond_resched();
 	}
+
+	udev->mbx_stats.event_hw_cnt++;
 
 	return ubase_cmd_wait_mbx_completed(udev, mbx);
 }

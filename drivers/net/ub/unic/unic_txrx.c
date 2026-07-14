@@ -6,6 +6,7 @@
 
 #define dev_fmt(fmt) "unic: (pid %d) " fmt, current->pid
 
+#include <ub/ubase/ubase_comm_dev.h>
 #include <ub/ubase/ubase_comm_mbx.h>
 
 #include "unic_dev.h"
@@ -33,8 +34,16 @@ static u16 unic_get_cqe_period(u16 cqe_period)
 	return 0;
 }
 
-static void unic_init_jfc_ctx(struct unic_cq *cq, u8 jfc_shift, u32 tid,
-			      u16 cqe_coal_cnt, u16 cqe_coal_period)
+bool unic_jfc_support_ceqn9(struct unic_dev *unic_dev)
+
+{
+	return unic_dev->hw_ver != UBASE_HW_VER_A_0 &&
+	       unic_dev->hw_ver != UBASE_HW_VER_K_0;
+}
+
+static void unic_init_jfc_ctx(struct unic_cq *cq, u8 jfc_shift,
+			      struct unic_dev *unic_dev, u16 cqe_coal_cnt,
+			      u16 cqe_coal_period)
 {
 	struct unic_jfc_ctx *ctx = &cq->jfc_ctx;
 
@@ -48,9 +57,17 @@ static void unic_init_jfc_ctx(struct unic_cq *cq, u8 jfc_shift, u32 tid,
 			UNIC_CQE_VA_L_VALID_BIT;
 	ctx->cqe_base_addr_h = (cq->cqe_dma_addr >> UNIC_CQE_VA_H_OFFSET) &
 			UNIC_CQE_VA_H_VALID_BIT;
-	ctx->queue_token_id = tid;
-	ctx->cq_cnt_mode = UNIC_CQE_CNT_MODE_BY_COUNT;
-	ctx->ceqn = 0;
+
+	if (unic_jfc_support_ceqn9(unic_dev)) {
+		ctx->dw2_ceqn9.queue_token_id = unic_dev->tid;
+		ctx->dw2_ceqn9.ceqn = 0;
+		ctx->dw2_ceqn9.cq_cnt_mode = UNIC_CQE_CNT_MODE_BY_COUNT;
+
+	} else {
+		ctx->dw2_ceqn8.queue_token_id = unic_dev->tid;
+		ctx->dw2_ceqn8.ceqn = 0;
+		ctx->dw2_ceqn8.cq_cnt_mode = UNIC_CQE_CNT_MODE_BY_COUNT;
+	}
 	ctx->cqe_coalesce_cnt = cqe_coal_cnt;
 	ctx->cqe_coalesce_period = unic_get_cqe_period(cqe_coal_period);
 }
@@ -58,10 +75,11 @@ static void unic_init_jfc_ctx(struct unic_cq *cq, u8 jfc_shift, u32 tid,
 static int unic_cq_alloc_resource(struct auxiliary_device *adev,
 				  struct unic_cq *cq, u32 cqe_depth)
 {
+	struct unic_dev *unic_dev = dev_get_drvdata(&adev->dev);
 	u32 size = cqe_depth * unic_get_cqe_size();
 
-	cq->cqe = dma_alloc_coherent(adev->dev.parent, size,
-				     &cq->cqe_dma_addr, GFP_KERNEL);
+	cq->cqe = dma_alloc_coherent(adev->dev.parent, size, &cq->cqe_dma_addr,
+				     unic_dev->gfp);
 	if (!cq->cqe) {
 		dev_err(adev->dev.parent, "failed to dma alloc unic cqe.\n");
 		return -ENOMEM;
@@ -132,7 +150,6 @@ static int unic_post_destroy_jfc_ctx(struct auxiliary_device *adev, u32 jfcn)
 	return ret;
 }
 
-#if defined(UNIC_FPGA_COMPILE) || defined(UNIC_EVB_COMPILE)
 static void unic_jfc_wait_flush_done(struct unic_dev *unic_dev, u32 jfcn)
 {
 	struct auxiliary_device *adev = unic_dev->comdev.adev;
@@ -191,7 +208,6 @@ static void unic_jfc_wait_flush(struct unic_dev *unic_dev,
 		unic_jfc_wait_flush_done(unic_dev, (*cq)->jfcn);
 	}
 }
-#endif
 
 static void unic_destroy_multi_jfc_context(struct unic_dev *unic_dev,
 					   enum unic_cq_type type, u32 num)
@@ -215,9 +231,7 @@ static void unic_destroy_multi_jfc_context(struct unic_dev *unic_dev,
 			set_bit(i, &des_bitmap);
 	}
 
-#if defined(UNIC_FPGA_COMPILE) || defined(UNIC_EVB_COMPILE)
 	unic_jfc_wait_flush(unic_dev, type, num, des_bitmap);
-#endif
 }
 
 int unic_create_cq(struct unic_dev *unic_dev, u32 idx, enum unic_cq_type type)
@@ -255,8 +269,7 @@ int unic_create_cq(struct unic_dev *unic_dev, u32 idx, enum unic_cq_type type)
 
 	channels_num = unic_dev->channels.num;
 	jfc_shift = ilog2(roundup_pow_of_two(cqe_depth));
-	unic_init_jfc_ctx(cq, jfc_shift, unic_dev->tid,
-			  coal->int_ql, coal->int_gl);
+	unic_init_jfc_ctx(cq, jfc_shift, unic_dev, coal->int_ql, coal->int_gl);
 
 	cq->db_addr = mem_base->addr + UNIC_JFC_DB_OFFSET;
 
@@ -300,13 +313,17 @@ static void unic_multi_cq_res_destroy(struct unic_dev *unic_dev,
 
 void unic_destroy_cq(struct unic_dev *unic_dev, u32 num, enum unic_cq_type type)
 {
+	struct auxiliary_device *adev = unic_dev->comdev.adev;
+	enum ubase_reset_stage reset_stage;
+
 	if (!num)
 		return;
 
 	/* The hardware does not access the configured memory after the reset,
 	 * directly destroy the cq.
 	 */
-	if (test_bit(UNIC_STATE_RESETTING, &unic_dev->state))
+	reset_stage = ubase_get_reset_stage(adev);
+	if (reset_stage == UBASE_RESET_STAGE_UNINIT)
 		goto cq_res_destroy;
 
 	unic_destroy_multi_jfc_context(unic_dev, type, num);

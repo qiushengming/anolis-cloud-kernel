@@ -6,12 +6,14 @@
 
 #include <linux/debugfs.h>
 #include <ub/ubase/ubase_comm_debugfs.h>
-#include <ub/ubase/ubase_comm_hw.h>
+#include <ub/ubase/ubase_comm_dev.h>
 #include <ub/ubase/ubase_comm_mbx.h>
 
-#include "unic_ctx_debugfs.h"
 #include "unic_debugfs.h"
 #include "unic_dev.h"
+#include "unic_event.h"
+#include "unic_txrx.h"
+#include "unic_ctx_debugfs.h"
 
 static inline void unic_jfs_ctx_titles_print(struct seq_file *s)
 {
@@ -32,7 +34,7 @@ static void unic_dump_jfs_ctx_info_sw(struct unic_sq *sq, struct seq_file *s,
 
 static inline void unic_jfr_ctx_titles_print(struct seq_file *s)
 {
-	seq_puts(s, "RQ_ID  STATE  RQE_SHIFT  RX_JFCN  PI     CI");
+	seq_puts(s, "RQ_ID  STATE  RQE_SHIFT  RX_JFCN  PI     CI     ");
 	seq_puts(s, "RECORD_DB_EN\n");
 }
 
@@ -55,13 +57,14 @@ static void unic_dump_jfr_ctx_info_sw(struct unic_rq *rq, struct seq_file *s,
 
 static inline void unic_jfc_ctx_titles_print(struct seq_file *s)
 {
-	seq_puts(s, "CQ_ID  ARM_ST  STATE  INLINE_EN  SHIFT  CQE_COAL_CNT");
+	seq_puts(s, "CQ_ID  ARM_ST  STATE  INLINE_EN  SHIFT  CQE_COAL_CNT  ");
 	seq_puts(s, "CEQN  RECORD_DB_EN  CQE_COAL_PEIRIOD\n");
 }
 
 static void unic_dump_jfc_ctx_info_sw(struct unic_cq *cq, struct seq_file *s,
 				      u32 index)
 {
+	struct unic_dev *unic_dev = dev_get_drvdata(s->private);
 	struct unic_jfc_ctx *ctx = &cq->jfc_ctx;
 
 	seq_printf(s, "%-7u", index);
@@ -70,9 +73,90 @@ static void unic_dump_jfc_ctx_info_sw(struct unic_cq *cq, struct seq_file *s,
 	seq_printf(s, "%-11u", ctx->inline_en);
 	seq_printf(s, "%-7u", ctx->shift);
 	seq_printf(s, "%-14u", ctx->cqe_coalesce_cnt);
-	seq_printf(s, "%-6u", ctx->ceqn);
+
+	if (unic_jfc_support_ceqn9(unic_dev))
+		seq_printf(s, "%-6u", ctx->dw2_ceqn9.ceqn);
+
+	else
+		seq_printf(s, "%-6u", ctx->dw2_ceqn8.ceqn);
 	seq_printf(s, "%-14u", ctx->record_db_en);
 	seq_printf(s, "%-18u\n", ctx->cqe_coalesce_period);
+}
+
+static inline void unic_jfs_sq_info_print(struct seq_file *s)
+{
+	seq_puts(s, "SQ_ID  PI  CI  LAST_PI  START_CI  ");
+	seq_puts(s, "CHECK_CI_LATE  QUEUE_INDEX  QUEUE_STATE  ");
+	seq_puts(s, "TX_BUFF_NUM  TX_BUFF_PI  TX_BUFF_CI\n");
+}
+
+static inline void unic_jfr_rq_info_print(struct seq_file *s)
+{
+	seq_puts(s, "RQ_ID  PI  CI  QUEUE_INDEX  PENDING_BUF\n");
+}
+
+static inline void unic_jfc_sq_cq_info_print(struct seq_file *s)
+{
+	seq_puts(s, "SQ_CQ_ID  JFCN  CI\n");
+}
+
+static inline void unic_jfc_rq_cq_info_print(struct seq_file *s)
+{
+	seq_puts(s, "RQ_CQ_ID  JFCN  CI\n");
+}
+
+static void unic_get_jfs_sq_info(struct unic_dev *unic_dev,
+				 struct seq_file *s, u32 index)
+{
+	struct unic_sq *sq = unic_dev->channels.c[index].sq;
+	struct net_device *netdev = unic_dev->comdev.netdev;
+	struct netdev_queue *queue;
+
+	queue = netdev_get_tx_queue(netdev, sq->queue_index);
+
+	seq_printf(s, "%-7u", index);
+	seq_printf(s, "%-4u", sq->pi);
+	seq_printf(s, "%-4u", sq->ci);
+	seq_printf(s, "%-9u", sq->last_pi);
+	seq_printf(s, "%-10u", sq->start_pi);
+	seq_printf(s, "%-15d", sq->check_ci_late);
+	seq_printf(s, "%-13u", sq->queue_index);
+	seq_printf(s, "%-13lu", queue->state);
+	seq_printf(s, "%-13u", sq->tx_buff->num);
+	seq_printf(s, "%-12u", sq->tx_buff->pi);
+	seq_printf(s, "%-10u\n", sq->tx_buff->ci);
+}
+
+static void unic_get_jfr_rq_info(struct unic_dev *unic_dev,
+				 struct seq_file *s, u32 index)
+{
+	struct unic_rq *rq = unic_dev->channels.c[index].rq;
+
+	seq_printf(s, "%-7u", index);
+	seq_printf(s, "%-4u", rq->pi);
+	seq_printf(s, "%-4u", rq->ci);
+	seq_printf(s, "%-13u", rq->queue_index);
+	seq_printf(s, "%-11u\n", rq->pending_buf);
+}
+
+static void unic_get_jfc_sq_cq_info(struct unic_dev *unic_dev,
+				    struct seq_file *s, u32 index)
+{
+	struct unic_cq *sq_cq = unic_dev->channels.c[index].sq_cq;
+
+	seq_printf(s, "%-10u", index);
+	seq_printf(s, "%-6u", sq_cq->jfcn);
+	seq_printf(s, "%-2u\n", sq_cq->ci);
+}
+
+static void unic_get_jfc_rq_cq_info(struct unic_dev *unic_dev,
+				    struct seq_file *s, u32 index)
+{
+	struct unic_cq *rq_cq = unic_dev->channels.c[index].rq_cq;
+
+	seq_printf(s, "%-10u", index);
+	seq_printf(s, "%-6u", rq_cq->jfcn);
+	seq_printf(s, "%-2u\n", rq_cq->ci);
 }
 
 static void unic_get_jfs_ctx_sw(struct unic_channels *channels,
@@ -107,24 +191,30 @@ static void unic_get_rq_jfc_ctx_sw(struct unic_channels *channels,
 	unic_dump_jfc_ctx_info_sw(channel->rq->cq, s, index);
 }
 
-enum unic_dbg_ctx_type {
-	UNIC_DBG_JFS_CTX = 0,
-	UNIC_DBG_JFR_CTX,
-	UNIC_DBG_SQ_JFC_CTX,
-	UNIC_DBG_RQ_JFC_CTX,
-};
-
 static int unic_dbg_dump_ctx_sw(struct seq_file *s, void *data,
 				enum unic_dbg_ctx_type ctx_type)
 {
 	struct unic_dbg_context {
 		void (*print_ctx_titles)(struct seq_file *s);
-		void (*get_ctx)(struct unic_channels *channels, struct seq_file *s, u32 index);
+		void (*get_ctx)(struct unic_channels *channels,
+				struct seq_file *s, u32 index);
 	} dbg_ctx[] = {
-		{unic_jfs_ctx_titles_print, unic_get_jfs_ctx_sw},
-		{unic_jfr_ctx_titles_print, unic_get_jfr_ctx_sw},
-		{unic_jfc_ctx_titles_print, unic_get_sq_jfc_ctx_sw},
-		{unic_jfc_ctx_titles_print, unic_get_rq_jfc_ctx_sw},
+		{
+			.print_ctx_titles = unic_jfs_ctx_titles_print,
+			.get_ctx = unic_get_jfs_ctx_sw,
+		},
+		{
+			.print_ctx_titles = unic_jfr_ctx_titles_print,
+			.get_ctx = unic_get_jfr_ctx_sw,
+		},
+		{
+			.print_ctx_titles = unic_jfc_ctx_titles_print,
+			.get_ctx = unic_get_sq_jfc_ctx_sw,
+		},
+		{
+			.print_ctx_titles = unic_jfc_ctx_titles_print,
+			.get_ctx = unic_get_rq_jfc_ctx_sw,
+		},
 	};
 	struct unic_dev *unic_dev = dev_get_drvdata(s->private);
 	int ret = 0;
@@ -169,122 +259,54 @@ int unic_dbg_dump_sq_jfc_ctx_sw(struct seq_file *s, void *data)
 	return unic_dbg_dump_ctx_sw(s, data, UNIC_DBG_SQ_JFC_CTX);
 }
 
-struct unic_ctx_info {
-	u32 start_idx;
-	u32 ctx_size;
-	u8 op;
-	const char *ctx_name;
-};
-
-static int unic_get_ctx_info(struct unic_dev *unic_dev,
-			     enum unic_dbg_ctx_type ctx_type,
-			     struct unic_ctx_info *ctx_info)
+int unic_dbg_dump_sq_rq_cq_info(struct seq_file *s, void *data)
 {
-	struct ubase_adev_caps *unic_caps = ubase_get_unic_caps(unic_dev->comdev.adev);
+	struct unic_dbg_context {
+		void (*print_titles)(struct seq_file *s);
+		void (*get_info)(struct unic_dev *unic_dev, struct seq_file *s,
+				 u32 index);
+	} dbg_ctx[] = {
+		{
+			.print_titles = unic_jfs_sq_info_print,
+			.get_info = unic_get_jfs_sq_info,
+		},
+		{
+			.print_titles = unic_jfr_rq_info_print,
+			.get_info = unic_get_jfr_rq_info,
+		},
+		{
+			.print_titles = unic_jfc_sq_cq_info_print,
+			.get_info = unic_get_jfc_sq_cq_info,
+		},
+		{
+			.print_titles = unic_jfc_rq_cq_info_print,
+			.get_info = unic_get_jfc_rq_cq_info,
+		},
+	};
+	struct unic_dev *priv = dev_get_drvdata(s->private);
+	u32 ctx_num = ARRAY_SIZE(dbg_ctx);
+	int ret = 0;
+	u32 i, j;
 
-	if (!unic_caps) {
-		unic_err(unic_dev, "failed to get unic caps.\n");
-		return -ENODATA;
+	if (!mutex_trylock(&priv->channels.mutex))
+		return -EBUSY;
+
+	if (__unic_resetting(priv) || !priv->channels.c) {
+		ret = -EBUSY;
+		goto out;
 	}
 
-	switch (ctx_type) {
-	case UNIC_DBG_JFS_CTX:
-		ctx_info->start_idx = unic_caps->jfs.start_idx;
-		ctx_info->ctx_size = UBASE_JFS_CTX_SIZE;
-		ctx_info->op = UBASE_MB_QUERY_JFS_CONTEXT;
-		ctx_info->ctx_name = "jfs";
-		break;
-	case UNIC_DBG_JFR_CTX:
-		ctx_info->start_idx = unic_caps->jfr.start_idx;
-		ctx_info->ctx_size = UBASE_JFR_CTX_SIZE;
-		ctx_info->op = UBASE_MB_QUERY_JFR_CONTEXT;
-		ctx_info->ctx_name = "jfr";
-		break;
-	case UNIC_DBG_SQ_JFC_CTX:
-		ctx_info->start_idx = unic_caps->jfc.start_idx;
-		ctx_info->ctx_size = UBASE_JFC_CTX_SIZE;
-		ctx_info->op = UBASE_MB_QUERY_JFC_CONTEXT;
-		ctx_info->ctx_name = "sq_jfc";
-		break;
-	case UNIC_DBG_RQ_JFC_CTX:
-		ctx_info->start_idx = unic_caps->jfc.start_idx +
-				      unic_dev->channels.num;
-		ctx_info->ctx_size = UBASE_JFC_CTX_SIZE;
-		ctx_info->op = UBASE_MB_QUERY_JFC_CONTEXT;
-		ctx_info->ctx_name = "rq_jfc";
-		break;
-	default:
-		unic_err(unic_dev, "failed to get ctx info, ctx_type = %u.\n",
-			 ctx_type);
-		return -ENODATA;
+	for (i = 0; i < ctx_num; i++) {
+		dbg_ctx[i].print_titles(s);
+		for (j = 0; j < priv->channels.num; j++)
+			dbg_ctx[i].get_info(priv, s, j);
+
+		seq_puts(s, "\n");
 	}
 
-	return 0;
-}
-
-static void unic_mask_jfs_ctx_key_words(void *buf)
-{
-	struct unic_jfs_ctx *jfs = (struct unic_jfs_ctx *)buf;
-
-	jfs->sqe_token_id_l = 0;
-	jfs->sqe_token_id_h = 0;
-	jfs->sqe_base_addr_l = 0;
-	jfs->sqe_base_addr_h = 0;
-	jfs->sqe_pld_tokenid = 0;
-	jfs->rmt_tokenid = 0;
-	jfs->user_data_l = 0;
-	jfs->user_data_h = 0;
-}
-
-static void unic_mask_jfr_ctx_key_words(void *buf)
-{
-	struct unic_jfr_ctx *jfr = (struct unic_jfr_ctx *)buf;
-
-	jfr->rqe_token_id_l = 0;
-	jfr->rqe_token_id_h = 0;
-	jfr->rqe_base_addr_l = 0;
-	jfr->rqe_base_addr_h = 0;
-	jfr->pld_token_id = 0;
-	jfr->token_value = 0;
-	jfr->user_data_l = 0;
-	jfr->user_data_h = 0;
-	jfr->idx_que_addr_l = 0;
-	jfr->idx_que_addr_h = 0;
-	jfr->record_db_addr_l = 0;
-	jfr->record_db_addr_m = 0;
-	jfr->record_db_addr_h = 0;
-}
-
-static void unic_mask_jfc_ctx_key_words(void *buf)
-{
-	struct unic_jfc_ctx *jfc = (struct unic_jfc_ctx *)buf;
-
-	jfc->cqe_base_addr_l = 0;
-	jfc->cqe_base_addr_h = 0;
-	jfc->queue_token_id = 0;
-	jfc->record_db_addr_l = 0;
-	jfc->record_db_addr_h = 0;
-	jfc->rmt_token_id = 0;
-	jfc->remote_token_value = 0;
-}
-
-static void unic_mask_ctx_key_words(void *buf,
-				    enum unic_dbg_ctx_type ctx_type)
-{
-	switch (ctx_type) {
-	case UNIC_DBG_JFS_CTX:
-		unic_mask_jfs_ctx_key_words(buf);
-		break;
-	case UNIC_DBG_JFR_CTX:
-		unic_mask_jfr_ctx_key_words(buf);
-		break;
-	case UNIC_DBG_SQ_JFC_CTX:
-	case UNIC_DBG_RQ_JFC_CTX:
-		unic_mask_jfc_ctx_key_words(buf);
-		break;
-	default:
-		break;
-	}
+out:
+	mutex_unlock(&priv->channels.mutex);
+	return ret;
 }
 
 static int unic_dbg_dump_context_hw(struct seq_file *s, void *data,

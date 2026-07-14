@@ -10,6 +10,8 @@
 #include <linux/auxiliary_bus.h>
 #include <linux/types.h>
 
+#define UBASE_CMDQ_MAX_DATA_SIZE	(1024 - 8)
+
 #define UBASE_FW_VERSION_BYTE3_MASK	GENMASK(31, 24)
 #define UBASE_FW_VERSION_BYTE2_MASK	GENMASK(23, 16)
 #define UBASE_FW_VERSION_BYTE1_MASK	GENMASK(15, 8)
@@ -30,6 +32,8 @@ enum ubase_opcode_type {
 	/* Generic commands */
 	UBASE_OPC_QUERY_FW_VER		= 0x0001,
 	UBASE_OPC_QUERY_CTL_INFO	= 0x0003,
+	UBASE_OPC_QUERY_DTU_INFO	= 0x0005,
+	UBASE_OPC_CONFIG_DTU_TBL	= 0x0006,
 	UBASE_OPC_NOTIFY_DRV_CAPS	= 0x0007,
 	UBASE_OPC_QUERY_COMM_RSRC_PARAM	= 0x0030,
 	UBASE_OPC_QUERY_NIC_RSRC_PARAM	= 0x0031,
@@ -43,7 +47,9 @@ enum ubase_opcode_type {
 	UBASE_OPC_DFX_BA_REG		= 0x0043,
 	UBASE_OPC_DFX_TP_REG		= 0x0044,
 	UBASE_OPC_DFX_TA_REG		= 0x0045,
+	UBASE_OPC_QUERY_UE_TA_RSRC	= 0x0046,
 	UBASE_OPC_QUERY_BUS_EID		= 0x0047,
+	UBASE_OPC_DFX_HIMAC_REG		= 0x0048,
 	UBASE_OPC_QUERY_UBCL_CONFIG	= 0x0050,
 
 	/* NL commands */
@@ -51,6 +57,8 @@ enum ubase_opcode_type {
 	UBASE_OPC_VLAN_FILTER_CFG	= 0x2101,
 	UBASE_OPC_QUERY_VLAN_TBL	= 0x2102,
 	UBASE_OPC_CFG_VL_MAP		= 0x2206,
+	UBASE_OPC_CFG_DSCP_TC		= 0x2207,
+	UBASE_OPC_CFG_PRIO_TC		= 0x2208,
 	UBASE_OPC_CFG_ETS_TC_INFO	= 0x2340,
 	UBASE_OPC_QUERY_ETS_TCG_INFO	= 0x2341,
 	UBASE_OPC_QUERY_ETS_PORT_INFO	= 0x2342,
@@ -60,6 +68,7 @@ enum ubase_opcode_type {
 	UBASE_OPC_ADD_MAC_TBL		= 0x241B,
 	UBASE_OPC_DEL_MAC_TBL		= 0x241C,
 	UBASE_OPC_QUERY_MAC_TBL		= 0x241E,
+	UBASE_OPC_QUERY_MNG_TBL		= 0x241F,
 
 	/* TP commands */
 	UBASE_OPC_TP_TIMER_VA_CONFIG	= 0x3007,
@@ -88,6 +97,9 @@ enum ubase_opcode_type {
 	UBASE_OPC_START_PERF_STATS	= 0x5103,
 	UBASE_OPC_STOP_PERF_STATS	= 0x5104,
 	UBASE_OPC_QUERY_UB_PORT_BITMAP	= 0x5105,
+	UBASE_OPC_QUERY_UB_DL_PKT_STATS	= 0x5106,
+	UBASE_OPC_QUERY_PERF_STATS	= 0x5107,
+	UBASE_OPC_CLOSE_PERF_STATS	= 0x5108,
 
 	/* PHY commands */
 	UBASE_OPC_CONFIG_SPEED_DUP	= 0x6100,
@@ -103,7 +115,7 @@ enum ubase_opcode_type {
 
 	/* Mailbox commands */
 	UBASE_OPC_POST_MB		= 0x7000,
-	UBASE_OPC_QUERY_MB_ST		= 0X7001,
+	UBASE_OPC_QUERY_MB_ST		= 0x7001,
 
 	/* Ubctl commands */
 	UBASE_OPC_QUERY_PORT_BITMAP	= 0xA017,
@@ -120,50 +132,20 @@ enum ubase_opcode_type {
 	UBASE_OPC_UE2UE_UBASE		= 0xF00E,
 	UBASE_OPC_ACTIVATE_REQ		= 0xF00F,
 	UBASE_OPC_ACTIVATE_RESP		= 0xF010,
+	UBASE_OPC_UE_ISOLATED_NOTIFY	= 0xF011,
+	UBASE_OPC_QUERY_UE_ISOLATED_STATE = 0xF012,
+	UBASE_OPC_SET_CTX_VA_REQ	= 0xF013,
+	UBASE_OPC_UPDATE_CTX_VA_STATUS	= 0xF014,
+	UBASE_OPC_UE_RESET_NOTIFY	= 0xF015,
+	UBASE_OPC_PROXY_TO_UBASE	= 0xF017,
+	UBASE_OPC_PROXY_TO_UDMA		= 0xF018,
+	UBASE_OPC_UE_TO_PROXY		= 0xF019,
+	UBASE_OPC_SET_CTX_VA_RESP	= 0xF01A,
 };
 
-/**
- * union ubase_mbox - ubase mailbox structure
- * @in_param_l: input data storage address lower 32 bits
- * @in_param_h: input data storage address high 32 bits
- * @cmd: mailbox command
- * @tag: queue id
- * @seq_num: sequence number
- * @event_en: 0-poll mode, 1-event mode
- * @mbx_ue_id: mailbox ub entity id
- * @rsv: reserved bits
- * @status: mailbox command execution completion status, 0-success, 1-fail
- * @hw_run: hardware running status, 0-not running, 1-running
- * @rsv1: reserved bits
- * @query_status:execution result of the mailbox query command, 0-success, 1-fail
- * @query_hw_run: hardware running status of the mailbox query command, 0-not running, 1-running
- * @query_rsv: reserved bits
- */
-union ubase_mbox {
-	struct {
-		/* MB 0 */
-		__le32 in_param_l;
-		/* MB 1 */
-		__le32 in_param_h;
-		/* MB 2 */
-		__le32 cmd : 8;
-		__le32 tag : 24;
-		/* MB 3 */
-		__le32 seq_num : 16;
-		__le32 event_en : 1;
-		__le32 mbx_ue_id : 8;
-		__le32 rsv : 7;
-		/* MB 4 */
-		__le32 status : 1;
-		__le32 hw_run : 1;
-		__le32 rsv1 : 30;
-	};
-
-	struct {
-		__le32 query_status : 1;
-		__le32 query_hw_run : 1;
-		__le32 query_rsv : 30;
-	};
+enum ubase_ue_to_proxy_module {
+	UBASE_MODULE_UDMA_TO_PROXY = 0x01,
+	UBASE_MODULE_UBASE_TO_PROXY = 0x02,
 };
 
 /**
@@ -178,6 +160,11 @@ struct ubase_cmd_buf {
 	bool	is_read;
 	u32	data_size;
 	void	*data;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 /**
@@ -191,8 +178,83 @@ struct ubase_crq_event_nb {
 	u16 opcode;
 	void *back;
 	int (*crq_handler)(void *dev, void *data, u32 len);
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
+/**
+ * struct ubase_proxy_req_msg - ubase proxy request message structure
+ * @bus_ue_id: bus ub entity id
+ * @mbx_ue_id: mailbox ub entity id
+ * @module: module that sends this request message
+ * @opcode: mailbox opcode
+ * @seq_num: message sequence number
+ * @tag: mailbox queue id
+ * @data_len: valid length of request message data
+ * @data: request message data
+ */
+struct ubase_proxy_req_msg {
+	__le16 bus_ue_id;
+	__le16 mbx_ue_id;
+	u16 module;
+	u16 opcode;
+	u32 seq_num;
+	u16 tag;
+	u16 data_len;
+	u8 data[];
+};
+
+/**
+ * struct ubase_proxy_resp_msg - ubase proxy response message structure
+ * @bus_ue_id: bus ub entity id
+ * @mbx_ue_id: mailbox ub entity id
+ * @seq_num: message sequence number
+ * @ret: return value of the request message execution result
+ * @rsv: reserved bits
+ * @data_len: valid length of response message data
+ * @data: response message data
+ */
+struct ubase_proxy_resp_msg {
+	__le16 bus_ue_id;
+	__le16 mbx_ue_id;
+	u32 seq_num;
+	int ret;
+	u8 rsv[2];
+	u16 data_len;
+	u8 data[];
+};
+
+/**
+ * struct ubase_proxy_set_ctx_va_cmd - ubase proxy set context va command structure
+ * @bus_ue_id: bus ub entity id
+ * @mbx_ue_id: mailbox ub entity id
+ * @ctx_type: context va type
+ * @result: result of context va configuration
+ * @resv: reserved bits
+ */
+struct ubase_proxy_set_ctx_va_cmd {
+	__le16	bus_ue_id;
+	__le16	mbx_ue_id;
+	__le16	ctx_type;
+	u16	result;
+	u8	resv[16];
+};
+
+/**
+ * ubase_fill_inout_buf() - fill ubase cmd buffer
+ * @buf: ubase cmd buffer
+ * @opcode: cmdq opcode
+ * @is_read: read or write, true for read, false for write
+ * @data_size: valid length of data
+ * @data: data buffer
+ *
+ * The function is used to assign 'opcode', 'is_read', 'data_size' and 'data'
+ * to 'struct ubase_cmd_buf'.
+ *
+ * Context: Process context.
+ */
 static inline void ubase_fill_inout_buf(struct ubase_cmd_buf *buf, u16 opcode,
 					bool is_read, u32 data_size, void *data)
 {
@@ -219,4 +281,4 @@ int ubase_register_crq_event(struct auxiliary_device *aux_dev,
 			     struct ubase_crq_event_nb *nb);
 void ubase_unregister_crq_event(struct auxiliary_device *aux_dev, u16 opcode);
 
-#endif
+#endif /* _UB_UBASE_COMM_CMD_H_ */

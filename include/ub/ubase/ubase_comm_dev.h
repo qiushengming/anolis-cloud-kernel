@@ -10,6 +10,7 @@
 #include <linux/auxiliary_bus.h>
 #include <linux/dcbnl.h>
 #include <linux/list.h>
+#include <ub/ubase/ubase_comm_mbx.h>
 
 struct iova_slot;
 
@@ -23,7 +24,7 @@ struct iova_slot;
 #error "UBASE_MAX_VL_NUM can't less than IEEE_8021QAZ_MAX_TCS"
 #endif
 
-#define UBASE_NIC_MAX_VL_NUM	(2)
+#define UBASE_NIC_MAX_VL_NUM	(2U)
 
 #define UBASE_SUP_UBL		BIT(0)
 #define UBASE_SUP_ETH		BIT(1)
@@ -36,6 +37,25 @@ struct iova_slot;
 #define UBASE_SUP_ALL		(UBASE_SUP_UNIC | UBASE_SUP_UDMA | \
 				 UBASE_SUP_CDMA | UBASE_SUP_PMU)
 #define UBASE_SUP_NO_PMU	(UBASE_SUP_ALL ^ UBASE_SUP_PMU)
+
+#define UBASE_HW_VER_UNKNOWN	(0U)
+#define UBASE_HW_VER_A_0	(1000U)
+#define UBASE_HW_VER_A_1	(1001U)
+#define UBASE_HW_VER_K_0	(2000U)
+#define UBASE_HW_VER_K_1	(2001U)
+#define UBASE_HW_VER_S_0	(3000U)
+
+#define UBASE_URMA_RTP_ROI	BIT(16)
+#define UBASE_URMA_RTP_ROT	BIT(17)
+#define UBASE_URMA_RTP_ROL	BIT(18)
+#define UBASE_URMA_CTP_ROI	BIT(19)
+#define UBASE_URMA_CTP_ROT	BIT(20)
+#define UBASE_URMA_CTP_ROL	BIT(21)
+#define UBASE_URMA_CTP_UNO	BIT(22)
+#define UBASE_URMA_UTP_UNO	BIT(23)
+
+#define UBASE_DEV_NEED_TO_ACTIVATE	BIT(0)
+#define UBASE_ADEV_PROBE_FAIL		BIT(0)
 
 enum ubase_reset_type {
 	UBASE_NO_RESET,
@@ -50,12 +70,13 @@ enum ubase_reset_stage {
 	UBASE_RESET_STAGE_UNINIT,
 	UBASE_RESET_STAGE_INIT,
 	UBASE_RESET_STAGE_UP,
+	UBASE_RESET_STAGE_ABORT,
 };
 
 /**
  * struct ubase_caps - ubase capabilities
  * @num_ceq_vectors: completion event vectors number
- * @num_aeq_vectors: asynchronous event vectors umber
+ * @num_aeq_vectors: asynchronous event vectors number
  * @num_misc_vectors: misc event vectors number
  * @aeqe_depth: the depth of asynchronous event vector queue
  * @ceqe_depth: the depth of completion event vector queue
@@ -91,6 +112,10 @@ enum ubase_reset_stage {
  * @upi: ub entity upi
  * @ctl_no: ub controller id
  * @fw_version: firmware version
+ * @dtu_pa_base: dtu table's physical base address
+ * @dtu_va_base: dtu table's virtual base address
+ * @dtu_iova_base: dtu table's I/O virtual base address
+ * @dtu_pa_size: dtu table's physical address size
  */
 struct ubase_caps {
 	u16	num_ceq_vectors;
@@ -137,6 +162,24 @@ struct ubase_caps {
 	u32	ctl_no;
 
 	u32	fw_version;
+
+	u64	dtu_pa_base;
+	u64	dtu_va_base;
+	u64	dtu_iova_base;
+	u64	dtu_pa_size;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
+	CK_KABI_RESERVE(9)
+	CK_KABI_RESERVE(10)
+	CK_KABI_RESERVE(11)
+	CK_KABI_RESERVE(12)
 };
 
 /**
@@ -149,6 +192,8 @@ struct ubase_res_caps {
 	u32	max_cnt;
 	u32	start_idx;
 	u32	depth;
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
 };
 
 /**
@@ -162,12 +207,35 @@ struct ubase_pmem_caps {
 };
 
 /**
+ * struct ubase_rc_que_addr - ubase rc queue memory address
+ * @iova: iova address
+ * @va: va address
+ */
+struct ubase_rc_que_addr {
+	dma_addr_t	iova;
+	void		*va;
+};
+
+/**
+ * struct ubase_rct_caps - ubase rc queue capabilities
+ * @depth: depth of each rc queue
+ * @max_cnt: max cnt of rc queue
+ * @addrs: rc queues' memory address
+ */
+struct ubase_rct_caps {
+	u32 depth;
+	u32 max_cnt;
+	struct ubase_rc_que_addr *addrs;
+};
+
+/**
  * struct ubase_adev_caps - ubase auxiliary device capabilities
  * @jfs: jfs resource capabilities
  * @jfr: jfr resource capabilities
  * @jfc: jfc resource capabilities
  * @tpg: tp group resource capabilities
  * @pmem: physical memory capabilities
+ * @rc: rc queue resource capabilities
  * @jtg_max_cnt: jetty group max count
  * @rc_max_cnt: rc max count
  * @rc_que_depth: rc queue depth
@@ -179,15 +247,30 @@ struct ubase_adev_caps {
 	struct ubase_res_caps	jfc;
 	struct ubase_res_caps	tpg;
 	struct ubase_pmem_caps	pmem;
+	struct ubase_rct_caps	rc;
 	u32			jtg_max_cnt;
 	u32			rc_max_cnt;
 	u32			rc_que_depth;
 	u16			cqe_size;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
+	CK_KABI_RESERVE(9)
+	CK_KABI_RESERVE(10)
+	CK_KABI_RESERVE(11)
+	CK_KABI_RESERVE(12)
 };
 
 /**
  * struct ubase_ctx_buf_cap - ubase context buffer capabilities
  * @dma_ctx_buf_ba: context buffer iova address
+ * @page: dtu memory pages
  * @slot: iova slot
  * @entry_size: context entry size
  * @entry_cnt: context entry count
@@ -197,28 +280,26 @@ struct ubase_adev_caps {
  */
 struct ubase_ctx_buf_cap {
 	dma_addr_t		dma_ctx_buf_ba; /* pass to hw */
+	struct page		*page; /* dtu only */
 	struct iova_slot	*slot;
 	u32			entry_size;
 	u32			entry_cnt;
 	u32			cnt_per_page_shift;
 	struct xarray		ctx_xa;
 	struct mutex		ctx_mutex;
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
-/**
- * struct ubase_ctx_buf - ubase context buffer information
- * @jfs: jfs context buffer capability
- * @jfr: jfr context buffer capability
- * @jfc: jfc context buffer capability
- * @jtg: jetty group context buffer capability
- * @rc: rc context buffer capability
- */
-struct ubase_ctx_buf {
-	struct ubase_ctx_buf_cap jfs;
-	struct ubase_ctx_buf_cap jfr;
-	struct ubase_ctx_buf_cap jfc;
-	struct ubase_ctx_buf_cap jtg;
-	struct ubase_ctx_buf_cap rc;
+enum ubase_ctx_va_type {
+	UBASE_JFR_CTX_VA,
+	UBASE_JFS_CTX_VA,
+	UBASE_JFC_CTX_VA,
+	UBASE_JTG_CTX_VA,
+	UBASE_RC_CTX_VA,
+	UBASE_CTX_VA_TYPE_NUM,
 };
 
 struct net_device;
@@ -231,6 +312,10 @@ struct net_device;
 struct ubase_adev_com {
 	struct auxiliary_device	*adev;
 	struct net_device	*netdev;
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 /**
@@ -241,6 +326,8 @@ struct ubase_adev_com {
 struct ubase_resource_space {
 	resource_size_t addr_unmapped;
 	void __iomem *addr;
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
 };
 
 /**
@@ -292,16 +379,13 @@ struct ubase_adev_qos {
 	/* common resource */
 	u8	ue_max_vl_id;
 	u8	ue_sl_vl[UBASE_MAX_SL_NUM];
-};
 
-/**
- * struct ubase_ue_node - ubase ub entity list node
- * @list: list head
- * @bus_ue_id: bus ub entity id
- */
-struct ubase_ue_node {
-	struct list_head	list;
-	u16			bus_ue_id;
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
 };
 
 #define UBASE_BUS_EID_LEN 4
@@ -314,13 +398,22 @@ struct ubase_bus_eid {
 	u32 eid[UBASE_BUS_EID_LEN];
 };
 
+u32 ubase_get_hw_ver(struct auxiliary_device *adev);
 bool ubase_adev_ubl_supported(struct auxiliary_device *adev);
 bool ubase_adev_ctrlq_supported(struct auxiliary_device *adev);
 bool ubase_adev_eth_mac_supported(struct auxiliary_device *adev);
+bool ubase_adev_non_mirror_mem_supported(struct auxiliary_device *adev);
 bool ubase_adev_mac_stats_supported(struct auxiliary_device *aux_dev);
+bool ubase_adev_mbx_supported(struct auxiliary_device *adev);
 bool ubase_adev_prealloc_supported(struct auxiliary_device *aux_dev);
 bool ubase_adev_ip_over_urma_supported(struct auxiliary_device *adev);
 bool ubase_adev_ip_over_urma_utp_supported(struct auxiliary_device *adev);
+bool ubase_adev_dtu_supported(struct auxiliary_device *aux_dev);
+int ubase_adev_get_mem_node_id(struct auxiliary_device *aux_dev);
+int ubase_dtu_tbl_init(struct auxiliary_device *aux_dev, u32 tid, u16 *dtu_win_num);
+int ubase_dtu_tbl_uninit(struct auxiliary_device *aux_dev, u16 dtu_win_num);
+bool ubase_adev_ucp_supported(struct auxiliary_device *adev);
+bool ubase_adev_shutting_down(struct auxiliary_device *adev);
 
 struct ubase_resource_space *ubase_get_io_base(struct auxiliary_device *adev);
 struct ubase_resource_space *ubase_get_mem_base(struct auxiliary_device *adev);
@@ -333,6 +426,13 @@ struct ubase_adev_qos *ubase_get_adev_qos(struct auxiliary_device *adev);
 void ubase_reset_event(struct auxiliary_device *adev,
 		       enum ubase_reset_type reset_type);
 enum ubase_reset_stage ubase_get_reset_stage(struct auxiliary_device *adev);
+
+void ubase_cmd_ctx_buf_free(struct auxiliary_device *aux_dev,
+			    struct ubase_ctx_buf_cap *ctx_buf);
+int ubase_cmd_ctx_buf_alloc(struct auxiliary_device *aux_dev,
+			    struct ubase_ctx_buf_cap *ctx_buf,
+			    struct ubase_mbx_attr *attr);
+
 void ubase_virt_register(struct auxiliary_device *adev,
 			 void (*virt_handler)(struct auxiliary_device *adev,
 					      u16 bus_ue_id, bool is_en));
@@ -342,8 +442,8 @@ void ubase_port_register(struct auxiliary_device *adev,
 					      bool link_up));
 void ubase_port_unregister(struct auxiliary_device *adev);
 void ubase_reset_register(struct auxiliary_device *adev,
-			  void (*reset_handler)(struct auxiliary_device *adev,
-						enum ubase_reset_stage stage));
+			  int (*reset_handler)(struct auxiliary_device *adev,
+					       enum ubase_reset_stage stage));
 void ubase_reset_unregister(struct auxiliary_device *adev);
 void ubase_activate_register(struct auxiliary_device *adev,
 			     void (*activate_handler)(struct auxiliary_device *adev,
@@ -357,4 +457,20 @@ int ubase_get_dev_mac(struct auxiliary_device *adev, u8 *dev_addr, u8 addr_len);
 int ubase_set_dev_mac(struct auxiliary_device *adev, const u8 *dev_addr,
 		      u8 addr_len);
 
-#endif
+void ubase_adev_fault_log(struct auxiliary_device *adev,
+			  u32 event_id, void *data);
+
+int ubase_adev_query_rc_ctx(struct auxiliary_device *adev, u32 rc_queue_idx,
+			    void *ctx, u32 ctx_size);
+
+int ubase_himac_reset(struct auxiliary_device *adev);
+unsigned long long ubase_get_ub_feature(void);
+
+void ubase_reinit_register(struct auxiliary_device *adev,
+			   int (*reinit_handler)(struct auxiliary_device *adev));
+void ubase_reinit_unregister(struct auxiliary_device *adev);
+
+void ubase_update_dev_status(struct auxiliary_device *adev, unsigned long status);
+void ubase_update_adev_status(struct auxiliary_device *adev, unsigned long status);
+
+#endif /* _UB_UBASE_COMM_DEV_H_ */

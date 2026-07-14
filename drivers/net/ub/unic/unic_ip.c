@@ -108,9 +108,9 @@ unlock_and_exit:
 	return ret;
 }
 
-int unic_handle_stack_ip_feedback(struct unic_vport *vport,
-				  enum UNIC_COMM_ADDR_STATE state,
-				  struct sockaddr *addr, u16 ip_mask)
+static int unic_handle_stack_ip_feedback(struct unic_vport *vport,
+					 enum UNIC_COMM_ADDR_STATE state,
+					 struct sockaddr *addr, u16 ip_mask)
 {
 	struct auxiliary_device *adev = vport->back->comdev.adev;
 	struct unic_dev *unic_dev = dev_get_drvdata(&adev->dev);
@@ -229,8 +229,8 @@ static int unic_set_stack_ip(struct net_device *dev,
 
 	skb = alloc_skb(NLMSG_ALIGN(sizeof(*req)), GFP_KERNEL);
 	if (!skb) {
-		unic_info(unic_dev,
-			  "failed to alloc skb, unic stop setting stack ip.\n");
+		unic_err(unic_dev,
+			 "failed to alloc skb, unic stop setting stack ip.\n");
 		return -ENOMEM;
 	}
 
@@ -468,12 +468,16 @@ int unic_handle_notify_ip_event(struct auxiliary_device *adev, u8 service_ver,
 	struct unic_stack_ip_info st_ip;
 	int ret;
 
+	if (!unic_dev_ubl_supported(priv))
+		return -EOPNOTSUPP;
+
 	if (service_ver != UBASE_CTRLQ_SER_VER_01)
 		return -EOPNOTSUPP;
 
 	if (len < sizeof(*req)) {
 		unic_err(priv, "failed to verify ip info size, len = %u.\n", len);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto send_resp;
 	}
 
 	req = (struct unic_ctrlq_ip_notify_req *)data;
@@ -484,7 +488,7 @@ int unic_handle_notify_ip_event(struct auxiliary_device *adev, u8 service_ver,
 	if (test_bit(UNIC_VPORT_STATE_IP_QUERYING, &vport->state)) {
 		ret = unic_update_tmp_ip_list(priv, &vport->addr_tbl.tmp_ip_list,
 					      &st_ip);
-		goto out;
+		goto unlock;
 	}
 
 	if (st_ip.ip_cmd == UNIC_CTRLQ_ADD_IP) {
@@ -500,9 +504,9 @@ int unic_handle_notify_ip_event(struct auxiliary_device *adev, u8 service_ver,
 					    (u8 *)&st_ip.ip_addr,
 					    st_ip.ip_mask);
 	} else {
-		ret = -EINVAL;
 		unic_err(priv, "invalid ip cmd by ctrlq, cmd = %u.\n", st_ip.ip_cmd);
-		goto out;
+		ret = -EINVAL;
+		goto unlock;
 	}
 
 	if (ret == -ENOENT) {
@@ -510,14 +514,15 @@ int unic_handle_notify_ip_event(struct auxiliary_device *adev, u8 service_ver,
 		unic_err(priv, "failed to delete IP %s from ip list.\n",
 			 format_ip);
 		ret = 0;
-		goto out;
+		goto unlock;
 	}
 
 	if (!ret)
 		set_bit(UNIC_VPORT_STATE_IP_TBL_CHANGE, &vport->state);
 
-out:
+unlock:
 	spin_unlock_bh(&vport->addr_tbl.tmp_ip_lock);
+send_resp:
 	unic_send_notify_ip_resp(adev, seq, (u8)(-ret));
 
 	return ret;
@@ -538,7 +543,7 @@ static int unic_update_ctrlq_ip_list(struct unic_ip_info *ip_info,
 	st_ip.ip_addr[2] = le32_to_be32(ip_info->ip_addr[1]);
 	st_ip.ip_addr[3] = le32_to_be32(ip_info->ip_addr[0]);
 
-	ip_node = kzalloc(sizeof(*ip_node), GFP_KERNEL);
+	ip_node = kzalloc(sizeof(*ip_node), GFP_ATOMIC);
 	if (!ip_node)
 		return -ENOMEM;
 
@@ -558,7 +563,7 @@ static int unic_update_ctrlq_ip_list(struct unic_ip_info *ip_info,
 		list_add_tail(&ip_node->node, &vport->addr_tbl.ip_list);
 	}
 
-	tmp_node = kzalloc(sizeof(*tmp_node), GFP_KERNEL);
+	tmp_node = kzalloc(sizeof(*tmp_node), GFP_ATOMIC);
 	if (!tmp_node)
 		return -ENOMEM;
 
@@ -624,13 +629,28 @@ static void unic_update_ip_list(struct unic_vport *vport,
 
 	spin_lock_bh(&vport->addr_tbl.ip_list_lock);
 
+	/* If the ip exists in ip list but does not exist in tmp list, the ip has
+	 * been deleted from the manager. If the ip has not been added to the
+	 * protocol stack, the node is directly removed. If the ip has been added
+	 * to the protocol stack, the node status is set to TO_DEL.
+	 */
 	list_for_each_entry_safe(ip_node, tmp, &vport->addr_tbl.ip_list, node) {
 		new_node = unic_comm_find_addr_node(list, ip_node->unic_addr,
 						    ip_node->node_mask);
-		if (!new_node)
-			ip_node->state = UNIC_COMM_ADDR_TO_DEL;
+		if (!new_node) {
+			if (ip_node->state == UNIC_COMM_ADDR_ACTIVE) {
+				ip_node->state = UNIC_COMM_ADDR_TO_DEL;
+			} else if (ip_node->state == UNIC_COMM_ADDR_TO_ADD) {
+				list_del(&ip_node->node);
+				kfree(ip_node);
+			}
+		}
 	}
 
+	/* During the query, the ip added or deleted by the manager are saved in
+	 * the tmp ip list. After the query is complete, the tmp ip list is
+	 * synchronized to the ip list.
+	 */
 	list_for_each_entry_safe(ip_node, tmp, &vport->addr_tbl.tmp_ip_list, node) {
 		new_node = unic_comm_find_addr_node(&vport->addr_tbl.ip_list,
 						    ip_node->unic_addr,
@@ -654,7 +674,7 @@ static void unic_update_ip_list(struct unic_vport *vport,
 	spin_unlock_bh(&vport->addr_tbl.ip_list_lock);
 }
 
-void unic_query_ip_addr(struct auxiliary_device *adev)
+int unic_query_ip_addr(struct auxiliary_device *adev)
 {
 #define UNIC_LOOP_COUNT(total_size, size) ((total_size) / (size) + 1)
 
@@ -665,6 +685,9 @@ void unic_query_ip_addr(struct auxiliary_device *adev)
 	u16 ip_index = 0, cnt = 0;
 	u8 get_count = 0;
 	int ret;
+
+	if (!unic_dev_ubl_supported(priv))
+		return 0;
 
 	set_bit(UNIC_VPORT_STATE_IP_QUERYING, &priv->vport.state);
 	INIT_LIST_HEAD(&tmp_list);
@@ -703,6 +726,8 @@ void unic_query_ip_addr(struct auxiliary_device *adev)
 		list_del(&ip_node->node);
 		kfree(ip_node);
 	}
+
+	return ret;
 }
 
 void unic_uninit_ip_table(struct unic_dev *unic_dev)

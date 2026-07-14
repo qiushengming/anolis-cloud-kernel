@@ -122,7 +122,7 @@ int unic_set_mac_speed_duplex(struct unic_dev *unic_dev, u32 speed, u8 duplex,
 	ret = ubase_cmd_send_in(unic_dev->comdev.adev, &in);
 	if (ret)
 		dev_err(unic_dev->comdev.adev->dev.parent,
-			"failed to send cmd in config speed(%u), ret = %d.\n",
+			"failed to send cmd in config speed(%uMbps), ret = %d.\n",
 			speed, ret);
 
 	return ret;
@@ -384,17 +384,14 @@ int unic_get_promisc_mode(struct unic_dev *unic_dev,
 	return ret;
 }
 
-int unic_set_promisc_mode(struct unic_dev *unic_dev,
-			  struct unic_promisc_en *promisc_en)
+static int unic_send_cfg_promisc_req(struct unic_dev *unic_dev,
+				     struct unic_promisc_en *promisc_en)
 {
 	struct auxiliary_device *adev = unic_dev->comdev.adev;
 	struct unic_promisc_cfg_cmd req = {0};
 	struct ubase_cmd_buf in;
 	u32 time_out;
 	int ret;
-
-	if (!unic_dev_ubl_supported(unic_dev))
-		promisc_en->en_bc = 1;
 
 	unic_setup_promisc_req(&req, promisc_en);
 
@@ -410,8 +407,18 @@ int unic_set_promisc_mode(struct unic_dev *unic_dev,
 	return ret;
 }
 
+int unic_set_promisc_mode(struct unic_dev *unic_dev,
+			  struct unic_promisc_en *promisc_en)
+{
+	if (!unic_dev_ubl_supported(unic_dev))
+		promisc_en->en_bc = 1;
+
+	return unic_send_cfg_promisc_req(unic_dev, promisc_en);
+}
+
 void unic_fill_promisc_en(struct unic_promisc_en *promisc_en, u8 flags)
 {
+	memset(promisc_en, 0, sizeof(*promisc_en));
 	promisc_en->en_uc_ip = !!(flags & UNIC_UPE);
 	promisc_en->en_mc = !!(flags & UNIC_MPE);
 	promisc_en->en_uc_mac = !!(flags & UNIC_UPE);
@@ -423,14 +430,14 @@ int unic_activate_promisc_mode(struct unic_dev *unic_dev, bool activate)
 	struct unic_promisc_en promisc_en = {0};
 	u8 flags;
 
-	flags = unic_dev->netdev_flags | unic_dev->vport.last_promisc_flags;
-	if (!flags)
-		return 0;
-
-	if (activate)
+	if (activate) {
+		flags = unic_dev->netdev_flags | unic_dev->vport.last_promisc_flags;
 		unic_fill_promisc_en(&promisc_en, flags);
+		if (!unic_dev_ubl_supported(unic_dev))
+			promisc_en.en_bc = 1;
+	}
 
-	return unic_set_promisc_mode(unic_dev, &promisc_en);
+	return unic_send_cfg_promisc_req(unic_dev, &promisc_en);
 }
 
 int unic_sync_promisc_mode(struct unic_dev *unic_dev)
@@ -552,8 +559,11 @@ static void unic_parse_dev_caps(struct unic_dev *unic_dev,
 	struct unic_caps *caps = &unic_dev->caps;
 	int i;
 
-	for (i = 0; i < UNIC_CAP_LEN; i++)
+	for (i = 0; i < UNIC_CAP_LEN; i++) {
 		unic_dev->cap_bits[i] = le32_to_cpu(resp->cap_bits[i]);
+		unic_info(unic_dev, "unic_dev cap_bits[%d] = 0x%x\n", i,
+			  unic_dev->cap_bits[i]);
+	}
 
 	caps->rx_buff_len = le16_to_cpu(resp->rx_buff_len);
 	caps->total_ip_tbl_size = le16_to_cpu(resp->total_ip_tbl_size);
@@ -569,6 +579,14 @@ static void unic_parse_dev_caps(struct unic_dev *unic_dev,
 	caps->max_int_gl = le16_to_cpu(resp->max_int_gl);
 
 	unic_parse_mac_cfg(unic_dev, resp);
+}
+
+static void unic_set_dev_gfp(struct unic_dev *unic_dev)
+{
+	struct auxiliary_device *adev = unic_dev->comdev.adev;
+
+	unic_dev->gfp = ubase_adev_non_mirror_mem_supported(adev) ?
+			GFP_HIGHUSER_MOVABLE : GFP_KERNEL;
 }
 
 int unic_query_dev_res(struct unic_dev *unic_dev)
@@ -594,6 +612,7 @@ int unic_query_dev_res(struct unic_dev *unic_dev)
 	}
 
 	unic_parse_dev_caps(unic_dev, &resp);
+	unic_set_dev_gfp(unic_dev);
 
 	return 0;
 }
@@ -946,7 +965,7 @@ static void unic_set_rss_multi_tc_param(struct auxiliary_device *adev,
 	}
 }
 
-int unic_set_rss_tc_mode(struct unic_dev *unic_dev, u8 tc_vaild)
+int unic_set_rss_tc_mode(struct unic_dev *unic_dev, u8 tc_valid)
 {
 	struct auxiliary_device *adev = unic_dev->comdev.adev;
 	struct unic_channels *channels = &unic_dev->channels;
@@ -962,11 +981,11 @@ int unic_set_rss_tc_mode(struct unic_dev *unic_dev, u8 tc_vaild)
 
 	unic_caps = ubase_get_unic_caps(adev);
 
-	req.tc_vaild = tc_vaild;
+	req.tc_valid = tc_valid;
 	req.tc_mode = channels->rss_vl_num <= 1 ? UNIC_RSS_TC_MODE0 :
 		      UNIC_RSS_TC_MODE1;
 	req.jfr_reg_num = min(unic_caps->jfr.max_cnt, UNIC_RSS_MAX_CNT);
-	if (req.tc_vaild) {
+	if (req.tc_valid) {
 		if (req.tc_mode == UNIC_RSS_TC_MODE0)
 			unic_set_rss_tc0_param(channels, req.jfr_reg_num,
 					       req.jfr_idx);

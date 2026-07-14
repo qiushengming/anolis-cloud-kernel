@@ -14,7 +14,7 @@
 #include <linux/udp.h>
 #include <linux/jiffies.h>
 #include <net/ipv6.h>
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 #include <net/ub/ubl.h>
 #endif
 #include <ub/ubase/ubase_comm_mbx.h>
@@ -86,7 +86,7 @@ static inline u16 unic_get_spare_page_num(struct unic_tx_buff *tx_buff)
 	return tx_buff->num - (pi - ci);
 }
 
-static bool unic_check_hw_ci_valid(u16 hw_ci, u16 sq_ci, struct unic_sq *sq)
+static bool unic_check_hw_ci_valid(struct unic_sq *sq, u16 hw_ci, u16 sq_ci)
 {
 	u16 sqebb_mask = unic_get_sqe_mask(sq);
 	struct unic_sqe_ctrl_section *ctrl;
@@ -100,6 +100,27 @@ static bool unic_check_hw_ci_valid(u16 hw_ci, u16 sq_ci, struct unic_sq *sq)
 		return false;
 	}
 
+	return true;
+}
+
+static bool unic_check_sq_ci_valid(struct unic_sq *sq, u32 sq_pi, u32 sq_ci)
+{
+	struct net_device *netdev = sq->netdev;
+	struct unic_dev *unic_dev = netdev_priv(netdev);
+	u16 sqebb_depth = unic_dev->channels.sqebb_depth;
+
+	if (unlikely(sq_pi < sq_ci))
+		sq_pi += UNIC_SQEBB_POINT_REVERSE;
+
+	if (unlikely(sq_pi == sq_ci)) {
+		unic_sq_stats_inc(sq, polled_old_pi);
+		return false;
+	}
+
+	if (unlikely(sq_pi - sq_ci > sqebb_depth)) {
+		unic_sq_stats_inc(sq, pi_ci_over_depth);
+		return false;
+	}
 	return true;
 }
 
@@ -137,20 +158,20 @@ static void unic_flush_unused_sqe(struct unic_sq *sq, u16 sqebb_mask,
 	}
 }
 
-static bool unic_check_hw_ci_late(struct unic_sq *sq, u16 sq_ci)
+static bool unic_check_hw_ci_late(struct unic_sq *sq, u32 sq_pi, u32 sq_ci)
 {
 	u32 effect_num, actual_num;
 
 	if (likely(!sq->check_ci_late))
 		return false;
 
-	effect_num = sq->pi < sq->start_pi ?
-		     (u32)sq->pi + UNIC_SQEBB_POINT_REVERSE - (u32)sq->start_pi :
-		     (u32)sq->pi - (u32)sq->start_pi;
+	effect_num = sq_pi < sq->start_pi ?
+		     sq_pi + UNIC_SQEBB_POINT_REVERSE - sq->start_pi :
+		     sq_pi - sq->start_pi;
 
-	actual_num = sq->pi < sq_ci ?
-		    (u32)sq->pi + UNIC_SQEBB_POINT_REVERSE - (u32)sq_ci :
-		    (u32)sq->pi - (u32)sq_ci;
+	actual_num = sq_pi < sq_ci ?
+		     sq_pi + UNIC_SQEBB_POINT_REVERSE - sq_ci :
+		     sq_pi - sq_ci;
 
 	if (unlikely(actual_num > effect_num)) {
 		unic_sq_stats_inc(sq, drop_cnt);
@@ -161,8 +182,25 @@ static bool unic_check_hw_ci_late(struct unic_sq *sq, u16 sq_ci)
 	return false;
 }
 
-static bool unic_reclaim_sq_space(struct unic_sq *sq, int budget, u64 *bytes,
-				  u64 *packets, bool clear)
+static void unic_count_tx_comp_stats(struct unic_sq *sq, union unic_cqe *cqe,
+				     struct unic_tx_comp_stats *stats,
+				     struct sk_buff *skb)
+{
+	struct unic_dev *unic_dev = netdev_priv(sq->netdev);
+
+	if (unlikely(cqe->tx.status || cqe->tx.sub_status) &&
+	    unic_abn_cqe_count_support(unic_dev)) {
+		unic_sq_abn_cqe_inc(sq, cqe->tx.status, cqe->tx.sub_status);
+		stats->abn_bytes += skb_headlen(skb);
+		stats->abn_packets++;
+	} else {
+		stats->bytes += skb_headlen(skb);
+		stats->packets++;
+	}
+}
+
+static bool unic_reclaim_sq_space(struct unic_sq *sq, int budget,
+				  bool clear, struct unic_tx_comp_stats *stats)
 {
 	struct net_device *netdev = sq->netdev;
 	struct unic_dev *unic_dev = netdev_priv(netdev);
@@ -170,15 +208,20 @@ static bool unic_reclaim_sq_space(struct unic_sq *sq, int budget, u64 *bytes,
 	u16 sqebb_mask = unic_get_sqe_mask(sq);
 	union unic_cqe *cqe = sq->cq->cqe;
 	struct unic_cq *cq = sq->cq;
-	u32 cq_mask, cq_ci = cq->ci;
+	u32 cq_mask, last_cq_ci = cq->ci;
+	u16 sq_pi, sq_ci = sq->ci;
 	bool reclaimed = false;
 	struct sk_buff *skb;
-	u16 sq_ci = sq->ci;
 
 	cq_mask = unic_get_sq_cqe_mask(unic_dev);
 	cqe = &cq->cqe[cq->ci & cq_mask];
 	while (unic_cqe_owner_is_soft(jfc_shift, cq->ci, cqe->tx.owner)) {
-		trace_unic_tx_cqe(netdev, cq, sq->pi, sq_ci, cq_mask);
+		/* ensure that this polling thread can read the newest sq->pi
+		 * and sq->skbs[index] which match the cqe.
+		 */
+		dma_rmb();
+		sq_pi = sq->pi;
+		trace_unic_tx_cqe(netdev, cq, sq_pi, sq_ci, cq_mask);
 		if (unlikely(cqe->tx.fd)) {
 			cq->ci++;
 			unic_sq_stats_inc(sq, fd_cnt);
@@ -187,17 +230,21 @@ static bool unic_reclaim_sq_space(struct unic_sq *sq, int budget, u64 *bytes,
 			break;
 		}
 
-		if (unlikely(!unic_check_hw_ci_valid(cqe->tx.raw_ci, sq_ci, sq)))
+		if (unlikely(!unic_check_hw_ci_valid(sq, cqe->tx.raw_ci, sq_ci) ||
+			     !unic_check_sq_ci_valid(sq, sq_pi, sq_ci)))
 			break;
 
 		skb = sq->skbs[sq_ci & sqebb_mask];
-
-		if (!clear && likely(!unic_check_hw_ci_late(sq, sq_ci))) {
-			*bytes += skb_headlen(skb);
-			(*packets)++;
+		if (unlikely(!skb)) {
+			unic_sq_stats_inc(sq, polled_skb_null);
+			break;
 		}
 
+		if (!clear && likely(!unic_check_hw_ci_late(sq, sq_pi, sq_ci)))
+			unic_count_tx_comp_stats(sq, cqe, stats, skb);
+
 		napi_consume_skb(skb, budget);
+		sq->skbs[sq_ci & sqebb_mask] = NULL;
 		unic_reclaim_single_sqe_space(sq, sqebb_mask, &sq_ci);
 
 		reclaimed = true;
@@ -205,7 +252,7 @@ static bool unic_reclaim_sq_space(struct unic_sq *sq, int budget, u64 *bytes,
 		cqe = &cq->cqe[cq->ci & cq_mask];
 	}
 
-	unic_cq_doorbell(cq, cq_ci);
+	unic_cq_doorbell(cq, last_cq_ci);
 	sq->ci = sq_ci;
 	return reclaimed;
 }
@@ -216,21 +263,21 @@ void unic_poll_tx(struct unic_sq *sq, int budget)
 #define UNIC_MIN_SPARE_PAGE	2
 
 	struct net_device *netdev = sq->netdev;
+	struct unic_tx_comp_stats stats = {0};
 	struct netdev_queue *dev_queue;
 	struct unic_dev *unic_dev;
-	u64 packets = 0;
-	u64 bytes = 0;
 
-	if (unlikely(!unic_reclaim_sq_space(sq, budget, &bytes, &packets, false)))
+	if (unlikely(!unic_reclaim_sq_space(sq, budget, false, &stats)))
 		return;
 
 	u64_stats_update_begin(&sq->syncp);
-	sq->stats.bytes += bytes;
-	sq->stats.packets += packets;
+	sq->stats.bytes += stats.bytes;
+	sq->stats.packets += stats.packets;
 	u64_stats_update_end(&sq->syncp);
 
 	dev_queue = netdev_get_tx_queue(netdev, sq->queue_index);
-	netdev_tx_completed_queue(dev_queue, packets, bytes);
+	netdev_tx_completed_queue(dev_queue, stats.packets + stats.abn_packets,
+				  stats.bytes + stats.abn_bytes);
 
 	if (unlikely(netif_carrier_ok(netdev) &&
 		     unic_get_spare_sqebb_num(sq) >= UNIC_MIN_SPARE_SQEBB &&
@@ -265,7 +312,7 @@ static void unic_init_jfs_ctx(struct unic_dev *unic_dev, struct unic_sq *sq,
 {
 	struct unic_jfs_ctx *ctx = &sq->jfs_ctx;
 
-	ctx->ta_timeout = UNIC_TIMEOUT_8S;
+	ctx->ta_timeout = UNIC_TIMEOUT_64S;
 	ctx->type = UNIC_RAW_TYPE;
 	ctx->sqe_bb_shift = unic_dev->channels.sqebb_shift;
 	ctx->state = UNIC_JFS_STATE_READY;
@@ -592,11 +639,7 @@ static void unic_destroy_multi_jfs(struct unic_dev *unic_dev, u32 num,
 	struct auxiliary_device *adev = unic_dev->comdev.adev;
 	u32 timeout_ms;
 
-#if defined(UNIC_FPGA_COMPILE)
 	timeout_ms = unic_get_ta_timeout_ms(UNIC_TIMEOUT_64S);
-#else
-	timeout_ms = unic_get_ta_timeout_ms(UNIC_TIMEOUT_8S);
-#endif
 
 	unic_multi_jfs_flush_prepare(unic_dev, num, timeout_ms, start_idx);
 
@@ -616,7 +659,7 @@ static void unic_sq_free_tx_buff_resources(struct auxiliary_device *adev,
 	for (i = 0; i < tx_buff->num; i++) {
 		page_info = &tx_buff->page_info[i];
 		dma_unmap_page(adev->dev.parent, page_info->sge_dma_addr,
-			       PAGE_SIZE, DMA_FROM_DEVICE);
+			       PAGE_SIZE, DMA_TO_DEVICE);
 		__free_page(page_info->p);
 	}
 
@@ -627,6 +670,7 @@ static int unic_sq_alloc_tx_buff_resources(struct auxiliary_device *adev,
 					   struct unic_tx_buff *tx_buff,
 					   u16 page_num)
 {
+	struct unic_dev *unic_dev = dev_get_drvdata(&adev->dev);
 	struct unic_tx_page_info *page_info;
 	int ret;
 	u16 i;
@@ -641,7 +685,8 @@ static int unic_sq_alloc_tx_buff_resources(struct auxiliary_device *adev,
 
 	for (i = 0; i < page_num; i++) {
 		page_info = &tx_buff->page_info[i];
-		page_info->p = alloc_page(GFP_KERNEL);
+		page_info->p = alloc_pages_node(dev_to_node(adev->dev.parent),
+						unic_dev->gfp, 0);
 		if (!page_info->p) {
 			dev_err(adev->dev.parent,
 				"failed to alloc %uth tx page.\n", i);
@@ -652,7 +697,7 @@ static int unic_sq_alloc_tx_buff_resources(struct auxiliary_device *adev,
 		page_info->sge_dma_addr = dma_map_page(adev->dev.parent,
 						       page_info->p, 0,
 						       PAGE_SIZE,
-						       DMA_FROM_DEVICE);
+						       DMA_TO_DEVICE);
 		if (unlikely(dma_mapping_error(adev->dev.parent,
 					       page_info->sge_dma_addr))) {
 			dev_err(adev->dev.parent,
@@ -690,7 +735,7 @@ static int unic_sq_alloc_resource(struct unic_dev *unic_dev, struct unic_sq *sq)
 	}
 
 	sq->sqebb = dma_alloc_coherent(adev->dev.parent, size,
-				       &sq->sqebb_dma_addr, GFP_KERNEL);
+				       &sq->sqebb_dma_addr, unic_dev->gfp);
 	if (!sq->sqebb) {
 		dev_err(adev->dev.parent, "failed to dma alloc unic sqebb.\n");
 		ret = -ENOMEM;
@@ -813,6 +858,7 @@ void unic_destroy_sq(struct unic_dev *unic_dev, u32 num)
 {
 	struct auxiliary_device *adev = unic_dev->comdev.adev;
 	struct ubase_adev_caps *unic_caps = ubase_get_unic_caps(adev);
+	enum ubase_reset_stage reset_stage;
 	u32 jfs_start_idx;
 
 	if (!num || !unic_caps)
@@ -820,19 +866,21 @@ void unic_destroy_sq(struct unic_dev *unic_dev, u32 num)
 
 	jfs_start_idx = unic_caps->jfs.start_idx;
 
-	if (!__unic_resetting(unic_dev))
+	reset_stage = ubase_get_reset_stage(adev);
+	if (reset_stage != UBASE_RESET_STAGE_UNINIT)
 		unic_destroy_multi_jfs(unic_dev, num, jfs_start_idx);
 
 	unic_free_multi_sq_resource(unic_dev, num);
 }
 
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 static int unic_apply_ub_pkt(struct unic_dev *unic_dev, struct unic_sq *sq,
 			     struct sk_buff *skb)
 {
-	struct ublhdr *ubl = (struct ublhdr *)skb->data;
+	struct ublhdr *ubl;
 
 	if (unic_dev_ubl_supported(unic_dev)) {
+		ubl = (struct ublhdr *)skb->data;
 		if (unlikely(ubl->cfg == UB_NOIP_CFG_TYPE)) {
 			unic_sq_stats_inc(sq, cfg5_drop_cnt);
 			return -EIO;
@@ -895,8 +943,6 @@ static void unic_fill_ctrl_owner(struct unic_sq *sq,
 static void unic_fill_ctrl_l3_info(struct unic_sqe_ctrl_section *ctrl,
 				   struct sk_buff *skb, struct unic_sq *sq)
 {
-#define be32_to_le32(x) cpu_to_le32(be32_to_cpu(x))
-
 	struct ipv6hdr *ip6_hdr;
 
 	if (skb->protocol == htons(ETH_P_IP)) {
@@ -991,7 +1037,7 @@ static int unic_set_l4(struct sk_buff *skb, struct unic_sqe_ctrl_section *ctrl,
 		 */
 		if (skb_is_gso(skb)) {
 			unic_err(unic_dev,
-				 "unknown l4 header tso packets hecksum offload.\n");
+				 "unknown l4 header tso packets checksum offload.\n");
 			return -EDOM;
 		}
 		/* the stack computes the IP header already,
@@ -1204,7 +1250,7 @@ netdev_tx_t unic_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 	if (!unic_dev_ubl_supported(unic_dev) &&
 	    skb_put_padto(skb, UNIC_MIN_TX_LEN)) {
 		unic_sq_stats_inc(sq, pad_err);
-		goto xmit_drop_pkt;
+		goto xmit_pad_err;
 	}
 
 	/* Prefetch the data used later */
@@ -1222,7 +1268,7 @@ netdev_tx_t unic_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 		goto xmit_drop_pkt;
 	}
 
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 	if (unic_apply_ub_pkt(unic_dev, sq, skb))
 		goto xmit_drop_pkt;
 #endif
@@ -1240,14 +1286,15 @@ netdev_tx_t unic_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 	return NETDEV_TX_OK;
 
 xmit_drop_pkt:
-	unic_tx_compensate_doorbell(sq);
 	dev_kfree_skb_any(skb);
+xmit_pad_err:
+	unic_tx_compensate_doorbell(sq);
 	return NETDEV_TX_OK;
 }
 
 void unic_clear_sq(struct unic_sq *sq)
 {
-	unic_reclaim_sq_space(sq, 0, NULL, NULL, true);
+	unic_reclaim_sq_space(sq, 0, true, NULL);
 	sq->start_pi = sq->pi;
 	sq->check_ci_late = true;
 }
@@ -1283,26 +1330,32 @@ void unic_dump_sq_stats(struct net_device *netdev, u32 queue_idx)
 
 	unic_info(unic_dev,
 		  "tx timeout, queue index: %u, state: %lu\n"
-		  "sq->pi:           %u\n"
-		  "sq->ci:           %u\n"
-		  "pad_err:          %llu\n"
-		  "bytes:            %llu\n"
-		  "packets:          %llu\n"
-		  "busy:             %llu\n"
-		  "more:             %llu\n"
-		  "restart_queue:    %llu\n"
-		  "over_max_sge_num: %llu\n"
-		  "csum_err:         %llu\n"
-		  "ci_mismatch:      %llu\n"
-		  "fd_cnt:           %llu\n"
-		  "drop_cnt:         %llu\n"
-		  "cfg5_drop_cnt:    %llu\n",
+		  "sq->pi:            %u\n"
+		  "sq->ci:            %u\n"
+		  "pad_err:           %llu\n"
+		  "bytes:             %llu\n"
+		  "packets:           %llu\n"
+		  "busy:              %llu\n"
+		  "more:              %llu\n"
+		  "restart_queue:     %llu\n"
+		  "over_max_sge_num:  %llu\n"
+		  "csum_err:          %llu\n"
+		  "ci_mismatch:       %llu\n"
+		  "fd_cnt:            %llu\n"
+		  "drop_cnt:          %llu\n"
+		  "cfg5_drop_cnt:     %llu\n"
+		  "polled_old_pi:     %llu\n"
+		  "polled_skb_null:   %llu\n"
+		  "pi_ci_over_depth:  %llu\n"
+		  "abn_cqe_total_cnt: %llu\n",
 		  queue_idx, queue->state, sq->pi, sq->ci,
 		  sq_stats->pad_err, sq_stats->bytes, sq_stats->packets,
 		  sq_stats->busy, sq_stats->more, sq_stats->restart_queue,
 		  sq_stats->over_max_sge_num, sq_stats->csum_err,
 		  sq_stats->ci_mismatch, sq_stats->fd_cnt, sq_stats->drop_cnt,
-		  sq_stats->cfg5_drop_cnt);
+		  sq_stats->cfg5_drop_cnt, sq_stats->polled_old_pi,
+		  sq_stats->polled_skb_null, sq_stats->pi_ci_over_depth,
+		  sq_stats->abn_cqe_total_cnt);
 }
 
 void unic_mask_key_words(void *sqebb)

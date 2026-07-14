@@ -7,6 +7,8 @@
 #ifndef __UBASE_EQ_H__
 #define __UBASE_EQ_H__
 
+#include <linux/sched.h>
+#include <linux/spinlock_types_raw.h>
 #include <ub/ubase/ubase_comm_eq.h>
 
 #include "ubase.h"
@@ -30,7 +32,7 @@
 #define UBASE_CEQ_CEQE_OWNER_BIT	BIT(31)
 #define UBASE_CEQE_COMP_CQN_M		GENMASK(19, 0)
 #define UBASE_EQ_DB_CMD_CEQ		0x2
-#define EQC_EQ_MAX_PERIOD_INDX	4U
+#define EQC_EQ_DEFAULT_PERIOD_INDX	4U
 
 #define UBASE_INT_NAME_LEN 32
 
@@ -87,6 +89,7 @@ struct ubase_ceqe {
 
 struct ubase_eq_addr {
 	void		*addr;
+	struct page	*page;
 	dma_addr_t	dma_addr;
 	size_t		size;
 };
@@ -171,6 +174,9 @@ struct ubase_aeq {
 	struct ubase_dev	*udev;
 	struct ubase_eq		eq;
 	struct ubase_event_nb	cb[UBASE_AE_LEVEL_NUM];
+	struct completion	poll;
+	struct task_struct	*ae_task;
+	raw_spinlock_t		aeq_lock;
 };
 
 struct ubase_ceqs {
@@ -203,6 +209,6 @@ void ubase_unregister_ae_event(struct ubase_dev *udev);
 
 void ubase_enable_misc_vector(struct ubase_dev *udev, bool enable);
 void ubase_disable_ce_irqs(struct ubase_dev *udev);
-int ubase_enable_ce_irqs(struct ubase_dev *udev);
-void ubase_ctrlq_task_schedule(struct ubase_dev *udev);
-#endif
+void ubase_errhandle_task_schedule(struct ubase_dev *udev);
+void ubase_ctrlq_task_schedule(struct ubase_dev *udev, unsigned long delay);
+#endif /* __UBASE_EQ_H__ */

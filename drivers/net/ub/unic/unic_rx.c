@@ -7,9 +7,10 @@
 #define dev_fmt(fmt) "unic: (pid %d) " fmt, current->pid
 
 #include <linux/etherdevice.h>
+#include <linux/jiffies.h>
 #include <linux/limits.h>
 #include <net/page_pool/helpers.h>
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 #include <net/ub/ubl.h>
 #endif
 #include <ub/ubase/ubase_comm_mbx.h>
@@ -371,7 +372,7 @@ static int unic_rq_alloc_resource(struct unic_dev *unic_dev, struct unic_rq *rq)
 
 	size = rqe_depth * sizeof(struct unic_rqe);
 	rq->rqe = dma_alloc_coherent(adev->dev.parent, size,
-				     &rq->rqe_base_dma_addr, GFP_KERNEL);
+				     &rq->rqe_base_dma_addr, unic_dev->gfp);
 	if (!rq->rqe) {
 		dev_err(adev->dev.parent, "failed to dma alloc unic rqe.\n");
 		ret = -ENOMEM;
@@ -381,7 +382,7 @@ static int unic_rq_alloc_resource(struct unic_dev *unic_dev, struct unic_rq *rq)
 	rq->sw_db.db_addr = dma_alloc_coherent(adev->dev.parent,
 					       UNIC_JFR_DB_SIZE,
 					       &rq->sw_db.db_dma_addr,
-					       GFP_KERNEL);
+					       unic_dev->gfp);
 	if (!rq->sw_db.db_addr) {
 		dev_err(adev->dev.parent,
 			"failed to dma alloc software db addr.\n");
@@ -777,6 +778,9 @@ static void unic_free_multi_rq_resource(struct unic_dev *unic_dev, u32 num)
 	struct unic_channel *channel;
 	u32 i;
 
+	if (ubase_adev_shutting_down(unic_dev->comdev.adev))
+		return;
+
 	for (i = 0; i < num; i++) {
 		channel = &unic_dev->channels.c[i];
 		if (!channel->rq) {
@@ -793,10 +797,14 @@ static void unic_free_multi_rq_resource(struct unic_dev *unic_dev, u32 num)
 
 void unic_destroy_rq(struct unic_dev *unic_dev, u32 num)
 {
+	struct auxiliary_device *adev = unic_dev->comdev.adev;
+	enum ubase_reset_stage reset_stage;
+
 	if (!num)
 		return;
 
-	if (!__unic_resetting(unic_dev))
+	reset_stage = ubase_get_reset_stage(adev);
+	if (reset_stage != UBASE_RESET_STAGE_UNINIT)
 		unic_destroy_multi_jfr_context(unic_dev, num);
 
 	unic_free_multi_rq_resource(unic_dev, num);
@@ -831,7 +839,7 @@ static void unic_handle_rx_csum(struct net_device *netdev, struct sk_buff *skb,
 	}
 }
 
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 static __be16 unic_assign_ub_proto(struct net_device *netdev,
 				   struct sk_buff *skb, u32 l3_type)
 {
@@ -866,7 +874,7 @@ static int unic_handle_cqe(struct unic_rq *rq, union unic_cqe *cqe)
 		return -EFAULT;
 	}
 
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 	if (unic_dev_ubl_supported(unic_dev))
 		skb->protocol = unic_assign_ub_proto(netdev, skb,
 						     unic_rx_ptype_tbl[cqe->rx.ptype].l3_type);
@@ -1057,7 +1065,7 @@ static int unic_rx_construct_skb(struct unic_rq *rq, struct napi_struct *napi,
 	rq->pending_buf += rqe_num;
 	ret = unic_create_skb(rq, napi, pkt_len);
 	if (unlikely(ret))
-		goto release_rx_buffer;
+		goto err_create_skb;
 
 	ret = unic_handle_cqe(rq, cqe);
 	if (unlikely(ret))
@@ -1070,8 +1078,8 @@ static int unic_rx_construct_skb(struct unic_rq *rq, struct napi_struct *napi,
 
 destroy_skb:
 	dev_kfree_skb_any(rq->skb);
+err_create_skb:
 	rq->skb = NULL;
-release_rx_buffer:
 	unic_page_pool_put_frags(rq, rqe_num);
 	return ret;
 }
@@ -1153,8 +1161,10 @@ int unic_poll_rx(struct unic_channel *c, int budget,
 			break;
 
 		trace_unic_rx_cqe(rq->netdev, cq, rq->pi, rq->ci, cq_mask);
-		if (unic_rx_construct_skb(rq, napi, cqe, &bytes))
+		if (unic_rx_construct_skb(rq, napi, cqe, &bytes)) {
+			failure = true;
 			break;
+		}
 
 		rx_fn(c, rq->skb);
 

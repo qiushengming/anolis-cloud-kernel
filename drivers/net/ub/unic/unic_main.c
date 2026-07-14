@@ -12,7 +12,6 @@
 
 #include "debugfs/unic_debugfs.h"
 #include "unic_dev.h"
-#include "unic_hw.h"
 #include "unic_netdev.h"
 
 static int unic_probe(struct auxiliary_device *adev,
@@ -23,6 +22,7 @@ static int unic_probe(struct auxiliary_device *adev,
 
 	ret = unic_dev_init(adev);
 	if (ret) {
+		ubase_adev_fault_log(adev, UNIC_FAULT_EVENT_ID_PROBE, NULL);
 		dev_err(adev->dev.parent,
 			"failed to init unic dev, ret = %d.\n", ret);
 		return ret;
@@ -38,6 +38,7 @@ static int unic_probe(struct auxiliary_device *adev,
 	}
 
 	set_bit(UNIC_STATE_INITED, &unic_dev->state);
+	ubase_update_adev_status(adev, 0);
 
 	return 0;
 }
@@ -52,6 +53,9 @@ static void unic_remove(struct auxiliary_device *adev)
 		msleep(UNIC_RESET_WAIT_TIME);
 
 	set_bit(UNIC_STATE_REMOVING, &unic_dev->state);
+
+	unic_info(unic_dev, "unic remove start.\n");
+
 	unic_dbg_uninit(adev);
 	unic_dev_uninit(adev);
 }
@@ -69,6 +73,9 @@ static struct auxiliary_driver unic_drv = {
 	.probe = unic_probe,
 	.remove = unic_remove,
 	.name = "unic",
+	.driver = {
+		.probe_type = PROBE_FORCE_SYNCHRONOUS,
+	},
 	.id_table = unic_id_table,
 };
 
@@ -86,6 +93,10 @@ static int __init unic_init(void)
 	if (ret)
 		goto err_reg_ip_notifier;
 
+	ret = unic_register_netdevice_notifier();
+	if (ret)
+		goto err_reg_netdev_notifier;
+
 	ret = auxiliary_driver_register(&unic_drv);
 	if (ret)
 		goto err_aux_reg;
@@ -93,6 +104,8 @@ static int __init unic_init(void)
 	return ret;
 
 err_aux_reg:
+	unic_unregister_netdevice_notifier();
+err_reg_netdev_notifier:
 	unic_unregister_ipaddr_notifier();
 err_reg_ip_notifier:
 	unic_destroy_wq();
@@ -101,6 +114,7 @@ err_reg_ip_notifier:
 
 static void __exit unic_exit(void)
 {
+	unic_unregister_netdevice_notifier();
 	unic_unregister_ipaddr_notifier();
 	auxiliary_driver_unregister(&unic_drv);
 	unic_destroy_wq();

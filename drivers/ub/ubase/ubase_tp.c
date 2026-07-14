@@ -51,7 +51,7 @@ static int ubase_notify_tp_flush_done(struct ubase_dev *udev, u32 tpn)
 	msg.out = &tmp_resp;
 	req.tpn = cpu_to_le32(tpn);
 
-	ret = __ubase_ctrlq_send(udev, &msg, NULL);
+	ret = __ubase_ctrlq_send(udev, &msg, true, NULL);
 	if (ret)
 		ubase_err(udev, "failed to notify tp flush done, ret = %d.\n",
 			  ret);
@@ -119,8 +119,10 @@ static int ubase_create_tp_tpg(struct ubase_dev *udev, u32 vl)
 	req.trans_type = UBASE_TRANS_TYPE_UM_TP;
 	req.vl = (u8)vl;
 
-	ret = __ubase_ctrlq_send(udev, &msg, NULL);
+	ret = __ubase_ctrlq_send(udev, &msg, true, NULL);
 	if (ret && ret != -EEXIST) {
+		if (ret == -ETIMEDOUT || ret == -ENODATA)
+			set_bit(UBASE_STATE_INIT_AGAIN_B, &udev->state_bits);
 		ubase_err(udev, "failed to alloc tp tpg, ret = %d.\n", ret);
 		return ret;
 	}
@@ -171,7 +173,7 @@ static void ubase_destroy_tp_tpg(struct ubase_dev *udev, u32 vl)
 	req.vl = (u8)vl;
 	req.trans_type = UBASE_TRANS_TYPE_UM_TP;
 
-	ret = __ubase_ctrlq_send(udev, &msg, NULL);
+	ret = __ubase_ctrlq_send(udev, &msg, true, NULL);
 	if (ret) {
 		ubase_err(udev,
 			  "failed to send destroy tp tpg request, tpgn = %u, ret = %d.\n",
@@ -185,6 +187,9 @@ static void ubase_destroy_tp_tpg(struct ubase_dev *udev, u32 vl)
 static void ubase_destroy_multi_tp_tpg(struct ubase_dev *udev, u32 num)
 {
 	u32 idx;
+
+	if (ubase_shutting_down(udev) && ubase_is_ctrl_node(udev))
+		return;
 
 	for (idx = 0; idx < num; idx++)
 		ubase_destroy_tp_tpg(udev, idx);

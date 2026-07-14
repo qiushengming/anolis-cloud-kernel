@@ -7,6 +7,7 @@
 #define dev_fmt(fmt) "unic: (pid %d) " fmt, current->pid
 
 #include <net/addrconf.h>
+#include <net/bonding.h>
 #include <net/dsfield.h>
 #include <linux/etherdevice.h>
 #include <linux/if_arp.h>
@@ -20,6 +21,7 @@
 #include <ub/ubase/ubase_comm_eq.h>
 #include <ub/ubase/ubase_comm_stats.h>
 
+#include "unic_bond.h"
 #include "unic_cmd.h"
 #include "unic_dev.h"
 #include "unic_event.h"
@@ -114,12 +116,17 @@ void unic_enable_channels(struct unic_dev *unic_dev)
 	if (!unic_dev->channels.c)
 		goto out;
 
+	if (test_bit(UNIC_NAPI_ENABLED, &unic_dev->channels.state))
+		goto out;
+
 	for (i = 0; i < unic_dev->channels.num; i++) {
 		c = &unic_dev->channels.c[i];
 		napi_enable(&c->napi);
 	}
 
 	ubase_comp_register(adev, unic_comp_handler);
+
+	set_bit(UNIC_NAPI_ENABLED, &unic_dev->channels.state);
 
 out:
 	mutex_unlock(&unic_dev->channels.mutex);
@@ -135,12 +142,17 @@ void unic_disable_channels(struct unic_dev *unic_dev)
 	if (!unic_dev->channels.c)
 		goto out;
 
+	if (!test_bit(UNIC_NAPI_ENABLED, &unic_dev->channels.state))
+		goto out;
+
 	ubase_comp_unregister(adev);
 
 	for (i = 0; i < unic_dev->channels.num; i++) {
 		c = &unic_dev->channels.c[i];
 		napi_disable(&c->napi);
 	}
+
+	clear_bit(UNIC_NAPI_ENABLED, &unic_dev->channels.state);
 
 out:
 	mutex_unlock(&unic_dev->channels.mutex);
@@ -183,6 +195,27 @@ static void unic_link_status_record(struct net_device *netdev, bool linkup)
 	idx = (total - 1) % LINK_STAT_MAX_IDX;
 	record->stats[idx].link_tv_sec = ktime_get_real_seconds();
 	record->stats[idx].link_status = linkup;
+
+	mutex_unlock(&record->lock);
+}
+
+static void unic_bond_status_record(struct net_device *netdev, bool tx_enabled)
+{
+	struct unic_dev *unic_dev = netdev_priv(netdev);
+	struct unic_bond_stats *record = &unic_dev->stats.bond_record;
+	u64 idx, total;
+
+	mutex_lock(&record->lock);
+
+	if (tx_enabled)
+		record->tx_enabled_cnt++;
+	else
+		record->tx_disabled_cnt++;
+
+	total = record->tx_enabled_cnt + record->tx_disabled_cnt;
+	idx = (total - 1) % BOND_STAT_MAX_IDX;
+	record->stats[idx].bond_tv_sec = ktime_get_real_seconds();
+	record->stats[idx].bond_status = tx_enabled;
 
 	mutex_unlock(&record->lock);
 }
@@ -259,6 +292,9 @@ int unic_net_open(struct net_device *netdev)
 
 	if (test_bit(UNIC_STATE_RESETTING, &unic_dev->state))
 		return -EBUSY;
+
+	if (test_bit(UNIC_STATE_CHANNEL_INVALID, &unic_dev->state))
+		return -ENODATA;
 
 	if (!test_bit(UNIC_STATE_DOWN, &unic_dev->state)) {
 		unic_warn(unic_dev, "net open repeatedly.\n");
@@ -413,6 +449,7 @@ static void unic_fetch_stats_tx(struct rtnl_link_stats64 *stats,
 		stats->tx_errors += channel->sq->stats.fd_cnt;
 		stats->tx_errors += channel->sq->stats.drop_cnt;
 		stats->tx_errors += channel->sq->stats.cfg5_drop_cnt;
+		stats->tx_errors += channel->sq->stats.abn_cqe_total_cnt;
 
 		stats->tx_dropped += channel->sq->stats.pad_err;
 		stats->tx_dropped += channel->sq->stats.over_max_sge_num;
@@ -421,6 +458,7 @@ static void unic_fetch_stats_tx(struct rtnl_link_stats64 *stats,
 		stats->tx_dropped += channel->sq->stats.fd_cnt;
 		stats->tx_dropped += channel->sq->stats.drop_cnt;
 		stats->tx_dropped += channel->sq->stats.cfg5_drop_cnt;
+		stats->tx_dropped += channel->sq->stats.abn_cqe_total_cnt;
 	} while (u64_stats_fetch_retry(&channel->sq->syncp, start));
 }
 
@@ -507,7 +545,8 @@ static int unic_change_mtu(struct net_device *netdev, int new_mtu)
 	int ret;
 
 	if (netif_running(netdev)) {
-		unic_err(unic_dev, "failed to change MTU, due to network interface is up, please down it first and try again.\n");
+		unic_err(unic_dev,
+			 "failed to change MTU, due to network interface is up, please down it first and try again.\n");
 		return -EBUSY;
 	}
 
@@ -546,8 +585,8 @@ static int unic_set_mac_address(struct net_device *netdev, void *addr)
 		return -EADDRNOTAVAIL;
 	}
 
-	unic_comm_format_mac_addr(format_mac, mac_addr->sa_data);
 	if (ether_addr_equal(netdev->dev_addr, mac_addr->sa_data)) {
+		unic_comm_format_mac_addr(format_mac, mac_addr->sa_data);
 		unic_info(unic_dev, "already using mac(%s).\n", format_mac);
 		return 0;
 	}
@@ -607,11 +646,7 @@ static void unic_set_rx_mode(struct net_device *netdev)
 
 static void unic_tx_timeout(struct net_device *netdev, u32 queue_idx)
 {
-	struct unic_dev *unic_dev = netdev_priv(netdev);
-
 	unic_dump_sq_stats(netdev, queue_idx);
-
-	ubase_reset_event(unic_dev->comdev.adev, UBASE_UE_RESET);
 }
 
 static u8 unic_get_skb_dscp(struct sk_buff *skb)
@@ -719,11 +754,56 @@ static bool unic_port_dev_check(const struct net_device *dev)
 	return dev->netdev_ops == &unic_netdev_ops;
 }
 
+static struct unic_dev *unic_get_bond_slave(struct net_device *ndev)
+{
+	struct slave *first_slave;
+	struct unic_dev *unic_dev;
+	struct bonding *bond;
+
+	if (!netif_is_bond_master(ndev))
+		return NULL;
+
+	rcu_read_lock();
+	bond = netdev_priv(ndev);
+	first_slave = bond_first_slave_rcu(bond);
+	if (!first_slave || !unic_port_dev_check(first_slave->dev)) {
+		rcu_read_unlock();
+		return NULL;
+	}
+
+	unic_dev = netdev_priv(first_slave->dev);
+	rcu_read_unlock();
+
+	return unic_dev;
+}
+
+static bool unic_is_linklocal_ip(struct sockaddr *sa)
+{
+	const struct sockaddr_in6 *addr6;
+
+	if (!sa || sa->sa_family != AF_INET6)
+		return false;
+
+	addr6 = (const struct sockaddr_in6 *)sa;
+	return !!(ipv6_addr_type(&addr6->sin6_addr) & IPV6_ADDR_LINKLOCAL);
+}
+
 static int unic_eth_ip_event(struct sockaddr *sa, struct net_device *ndev,
 			     u16 ip_mask, unsigned long event)
 {
 	enum UNIC_COMM_ADDR_STATE state;
+	struct unic_dev *unic_dev;
 	int ret = NOTIFY_OK;
+
+	if (unic_is_linklocal_ip(sa))
+		return NOTIFY_DONE;
+
+	unic_dev = unic_get_bond_slave(ndev);
+	if (!unic_dev)
+		return NOTIFY_DONE;
+
+	if (!unic_bond_ip_sync_supported(unic_dev))
+		return NOTIFY_DONE;
 
 	switch (event) {
 	case NETDEV_UP:
@@ -735,6 +815,9 @@ static int unic_eth_ip_event(struct sockaddr *sa, struct net_device *ndev,
 	default:
 		return NOTIFY_DONE;
 	}
+
+	if (unic_update_bond_ipaddr(unic_dev, sa, ip_mask, state))
+		ret = NOTIFY_BAD;
 
 	return ret;
 }
@@ -749,6 +832,8 @@ static int unic_ub_ip_event(struct sockaddr *sa, struct net_device *ndev,
 		return NOTIFY_DONE;
 
 	unic_dev = netdev_priv(ndev);
+	if (__unic_removing(unic_dev))
+		return NOTIFY_OK;
 
 	switch (event) {
 	case NETDEV_UP:
@@ -837,6 +922,70 @@ void unic_unregister_ipaddr_notifier(void)
 {
 	unregister_inetaddr_notifier(&unic_inetaddr_notifier);
 	unregister_inet6addr_notifier(&unic_inet6addr_notifier);
+}
+
+static int unic_update_bond_status(struct unic_dev *unic_dev,
+				   struct netdev_notifier_changelowerstate_info *info)
+{
+	struct unic_bond_status *bond_status = &unic_dev->bond_status;
+	struct netdev_lag_lower_state_info *lag_info;
+
+	if (!netif_is_bond_slave(unic_dev->comdev.netdev))
+		return NOTIFY_DONE;
+
+	lag_info = info->lower_state_info;
+
+	mutex_lock(&bond_status->mutex);
+	unic_dev->bond_status.cur_status = lag_info->tx_enabled;
+	mutex_unlock(&bond_status->mutex);
+
+	unic_dbg(unic_dev,
+		 "update bond_status: %u.\n", unic_dev->bond_status.cur_status);
+
+	unic_bond_status_record(unic_dev->comdev.netdev, lag_info->tx_enabled);
+
+	set_bit(UNIC_STATE_SYNC_BOND_PORT, &unic_dev->state);
+
+	return NOTIFY_OK;
+}
+
+static int unic_netdev_event(struct notifier_block *nb,
+			     unsigned long event, void *ptr)
+{
+	struct net_device *netdev;
+	struct unic_dev *unic_dev;
+
+	netdev = netdev_notifier_info_to_dev(ptr);
+	if (!netdev || !unic_port_dev_check(netdev))
+		return NOTIFY_DONE;
+
+	unic_dev = netdev_priv(netdev);
+
+	if (!unic_dev_eth_mac_supported(unic_dev))
+		return NOTIFY_DONE;
+
+	switch (event) {
+	case NETDEV_CHANGELOWERSTATE:
+		return unic_update_bond_status(unic_dev, ptr);
+	default:
+		break;
+	}
+
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block unic_netdev_notifier = {
+	.notifier_call = unic_netdev_event,
+};
+
+int unic_register_netdevice_notifier(void)
+{
+	return register_netdevice_notifier(&unic_netdev_notifier);
+}
+
+void unic_unregister_netdevice_notifier(void)
+{
+	unregister_netdevice_notifier(&unic_netdev_notifier);
 }
 
 int unic_query_link_status(struct unic_dev *unic_dev, u8 *link_status)

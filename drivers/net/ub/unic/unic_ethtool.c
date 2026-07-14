@@ -114,7 +114,8 @@ static int unic_check_ksettings_param(struct net_device *netdev,
 	/* if user not specify lanes, use current lanes */
 	lanes = cmd->lanes ? cmd->lanes : mac->lanes;
 	if (!unic_speed_supported(unic_dev, cmd->base.speed, lanes)) {
-		unic_err(unic_dev, "speed(%u) and lanes(%u) is not supported.\n",
+		unic_err(unic_dev,
+			 "speed(%uMbps) and lanes(%u) is not supported.\n",
 			 cmd->base.speed, lanes);
 		return -EINVAL;
 	}
@@ -155,7 +156,7 @@ static int unic_set_link_ksettings(struct net_device *netdev,
 		return ret;
 
 	unic_info(unic_dev,
-		  "set link: autoneg = %u, speed = %u, duplex = %u, lanes = %u.\n",
+		  "set link: autoneg = %u, speed = %uMbps, duplex = %u, lanes = %u.\n",
 		  cmd->base.autoneg, cmd->base.speed,
 		  cmd->base.duplex, cmd->lanes);
 
@@ -204,7 +205,7 @@ static void unic_update_pause_state(u8 pause_mode,
 static void unic_record_user_pauseparam(struct unic_dev *unic_dev,
 					struct ethtool_pauseparam *eth_pauseparam)
 {
-	struct	unic_pfc_info *pfc_info = &unic_dev->channels.vl.pfc_info;
+	struct unic_pfc_info *pfc_info = &unic_dev->channels.vl.pfc_info;
 	u32 rx_en = eth_pauseparam->rx_pause;
 	u32 tx_en = eth_pauseparam->tx_pause;
 
@@ -220,14 +221,12 @@ static void unic_record_user_pauseparam(struct unic_dev *unic_dev,
 static void unic_get_pauseparam(struct net_device *ndev,
 				struct ethtool_pauseparam *eth_pauseparam)
 {
-#define PAUSE_AUTONEG_OFF 0
-
 	struct unic_dev *unic_dev = netdev_priv(ndev);
 
 	if (!unic_dev_pause_supported(unic_dev))
 		return;
 
-	eth_pauseparam->autoneg = PAUSE_AUTONEG_OFF;
+	eth_pauseparam->autoneg = unic_dev->hw.mac.autoneg;
 
 	if (unic_dev->channels.vl.pfc_info.fc_mode & UNIC_FC_PFC_EN) {
 		eth_pauseparam->rx_pause = UNIC_RX_TX_PAUSE_OFF;
@@ -248,15 +247,25 @@ static int unic_set_pauseparam(struct net_device *ndev,
 	if (!unic_dev_pause_supported(unic_dev))
 		return -EOPNOTSUPP;
 
-	if (eth_pauseparam->autoneg) {
-		unic_warn(unic_dev,
-			  "failed to set pause, set autoneg not supported.\n");
+	if (unic_resetting(ndev))
+		return -EBUSY;
+
+	if (eth_pauseparam->autoneg && !unic_dev->hw.mac.support_autoneg) {
+		unic_err(unic_dev,
+			 "failed to set pause, autoneg not supported.\n");
+		return -EOPNOTSUPP;
+	}
+
+	if (unic_dev->hw.mac.autoneg != eth_pauseparam->autoneg &&
+	    unic_dev->hw.mac.support_autoneg) {
+		unic_err(unic_dev,
+			 "to change autoneg, please use: ethtool -s <dev> autoneg <on|off>\n");
 		return -EOPNOTSUPP;
 	}
 
 	if (unic_dev->channels.vl.pfc_info.fc_mode & UNIC_FC_PFC_EN) {
-		unic_warn(unic_dev,
-			  "failed to set pause, priority flow control enabled.\n");
+		unic_err(unic_dev,
+			 "failed to set pause, priority flow control enabled.\n");
 		return -EOPNOTSUPP;
 	}
 
@@ -310,8 +319,6 @@ static int unic_set_fecparam(struct net_device *ndev,
 	if (ret)
 		return ret;
 
-	mac->user_fec_mode = fec_mode;
-
 	return 0;
 }
 
@@ -344,15 +351,15 @@ static int unic_check_gl_coalesce_para(struct net_device *netdev,
 
 	if (cmd->rx_coalesce_usecs > unic_dev->caps.max_int_gl) {
 		unic_err(unic_dev,
-			 "invalid rx-usecs value, rx-usecs range is [0, %u].\n",
-			 unic_dev->caps.max_int_gl);
+			 "invalid rx-usecs value(%u), rx-usecs range is [0, %u].\n",
+			 cmd->rx_coalesce_usecs, unic_dev->caps.max_int_gl);
 		return -EINVAL;
 	}
 
 	if (cmd->tx_coalesce_usecs > unic_dev->caps.max_int_gl) {
 		unic_err(unic_dev,
-			 "invalid tx-usecs value, tx-usecs range is [0, %u].\n",
-			 unic_dev->caps.max_int_gl);
+			 "invalid tx-usecs value(%u), tx-usecs range is [0, %u].\n",
+			 cmd->tx_coalesce_usecs, unic_dev->caps.max_int_gl);
 		return -EINVAL;
 	}
 
@@ -389,7 +396,9 @@ static int unic_check_ql_coalesce_para(struct net_device *netdev,
 	if (cmd->tx_max_coalesced_frames > unic_dev->caps.max_int_ql ||
 	    cmd->rx_max_coalesced_frames > unic_dev->caps.max_int_ql) {
 		unic_err(unic_dev,
-			 "invalid coalesced frames value, range is [0, %u].\n",
+			 "invalid coalesced frames value(tx = %u, rx = %u), range is [0, %u].\n",
+			 cmd->tx_max_coalesced_frames,
+			 cmd->rx_max_coalesced_frames,
 			 unic_dev->caps.max_int_ql);
 		return -ERANGE;
 	}
