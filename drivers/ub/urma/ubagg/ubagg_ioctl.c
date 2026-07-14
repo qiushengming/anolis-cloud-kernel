@@ -24,7 +24,7 @@
 #include "ubagg_hash_table.h"
 
 #define UBAGG_DEVICE_MAX_EID_CNT 128
-#define UBAGG_MAX_BONDING_DEV_NUM 256
+#define UBAGG_MAX_BONDING_DEV_NUM 1024
 #define UBAGG_DEV_NAME_PREFIX "bonding_dev_"
 #define MAX_NUM_LEN 11
 #define BITMAP_OFFSET 1025
@@ -684,7 +684,6 @@ struct ubcore_jfr *ubagg_create_jfr(struct ubcore_device *ub_dev,
 		ubagg_log_err("ubagg fail to copy from user, ret:%d.\n", ret);
 		goto FREE_JFR;
 	}
-	jfr->ex_info.base.id = id;
 
 	ubagg_jfr_ht = &ubagg_dev->ubagg_ht[UBAGG_HT_JFR_HT];
 	spin_lock(&ubagg_jfr_ht->lock);
@@ -794,7 +793,6 @@ struct ubcore_jetty *ubagg_create_jetty(struct ubcore_device *dev,
 		ubagg_log_err("ubagg fail to copy from user, ret:%d.\n", ret);
 		goto FREE_JETTY;
 	}
-	jetty->ex_info.base.id = id;
 
 	ubagg_jetty_ht = &ubagg_dev->ubagg_ht[UBAGG_HT_JETTY_HT];
 	spin_lock(&ubagg_jetty_ht->lock);
@@ -1732,6 +1730,9 @@ static void print_topo_map(struct ubagg_topo_map *topo_map)
 				ubagg_log_info("------ chip_id[%d]: %u\n", iodie_idx,
 					node->agg_devs[dev_idx].ues[iodie_idx].chip_id);
 
+				ubagg_log_info("------ entity_id[%d]: %u\n", iodie_idx,
+					node->agg_devs[dev_idx].ues[iodie_idx].entity_id);
+
 				ubagg_log_info("------ primary_eid[%d]: " EID_FMT "\n", iodie_idx,
 					EID_RAW_ARGS(
 					node->agg_devs[dev_idx].ues[iodie_idx].primary_eid));
@@ -2038,6 +2039,7 @@ static int ubagg_delete_dev(const struct ubagg_delete_dev_arg *arg)
 	rmv_dev_from_list(dev);
 	ubcore_unregister_device(&dev->ub_dev);
 	uninit_ubagg_res(dev);
+	release_bond_device_id_with_name(dev->master_dev_name);
 
 	ubagg_dev_ref_put(dev);
 
