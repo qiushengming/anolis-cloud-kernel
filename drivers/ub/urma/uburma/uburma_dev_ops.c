@@ -121,11 +121,16 @@ int uburma_mmap(struct file *filp, struct vm_area_struct *vma)
 
 	vma->vm_ops = uburma_get_umap_ops();
 	ret = ubc_dev->ops->mmap(file->ucontext, vma);
+	if (ret != 0)
+		goto out;
+
 	if (!down_read_trylock(&file->cleanup_rwsem))
 		goto out;
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
-	if (!priv)
+	if (!priv) {
+		ret = -ENOMEM;
 		goto unlock_read;
+	}
 	uburma_umap_priv_init(priv, vma);
 
 unlock_read:
@@ -248,6 +253,7 @@ int uburma_close(struct inode *inode, struct file *filp)
 	if (!ubc_dev) {
 		uburma_log_info("ubcore device release in another proccess.\n");
 		srcu_read_unlock(&ubu_dev->ubc_dev_srcu, srcu_idx);
+		kref_put(&file->ref, uburma_release_file);
 		return 0;
 	}
 

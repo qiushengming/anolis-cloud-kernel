@@ -27,6 +27,7 @@ struct ubcore_cmd_hdr {
 #define UBCORE_CMD_MAGIC 'C'
 #define UBCORE_CMD _IOWR(UBCORE_CMD_MAGIC, 1, struct ubcore_cmd_hdr)
 #define UBCORE_MAX_CMD_SIZE 0x4000
+#define UBCORE_MAIN_UE_EID_BATCH_EID_MAX 128
 
 /* only for ubcore device ioctl */
 enum ubcore_cmd {
@@ -41,8 +42,8 @@ enum ubcore_cmd {
 	UBCORE_CMD_UNEXPOSE_DEV_NS,
 	UBCORE_CMD_SET_DEV_EID_NS,
 	UBCORE_CMD_GET_TOPO_INFO,
+	UBCORE_CMD_GET_V2P_RES,
 	UBCORE_CMD_SET_SL,
-	UBCORE_CMD_SET_GENL_PID,
 	UBCORE_CMD_UVS_INIT_RES,
 	/* alpha netlink ops begin: */
 	UBCORE_CMD_QUERY_TP_REQ,
@@ -64,7 +65,12 @@ enum ubcore_cmd {
 	UBCORE_CMD_UPDATE_MUE_DEV_INFO_RESP,
 	UBCORE_CMD_VTP_STATUS_NOTIFY,
 	UBCORE_CMD_MSG_ACK,
-	UBCORE_CMD_GET_TOPO_BONDING_DEV,
+	/* 33 and 34 are used by user-space admin command definitions. */
+	UBCORE_CMD_ADMIN_INSERT_MAIN_UE_EID = 35,
+	UBCORE_CMD_ADMIN_DELETE_MAIN_UE_EID,
+	UBCORE_CMD_ADMIN_LOOKUP_MAIN_UE_EID,
+	UBCORE_CMD_ADMIN_FLUSH_MAIN_UE_EID,
+	UBCORE_CMD_ADMIN_INSERT_MAIN_UE_EID_BATCH,
 	UBCORE_CMD_MAX
 };
 
@@ -92,6 +98,20 @@ struct ubcore_cmd_query_res {
 		uint32_t key_ext;
 		uint32_t key_cnt;
 		bool query_cnt;
+	} in;
+	struct {
+		uint64_t addr;
+		uint32_t len;
+		uint64_t save_ptr; /* save ubcore address for second ioctl */
+	} out;
+};
+
+struct ubcore_cmd_show_res {
+	struct {
+		char dev_name[UBCORE_MAX_DEV_NAME];
+		uint32_t type;
+		uint32_t key;
+		uint32_t key_cnt;
 	} in;
 	struct {
 		uint64_t addr;
@@ -133,15 +153,6 @@ struct ubcore_cmd_topo_info {
 	struct {
 		uint32_t node_num;
 		struct ubcore_topo_node topo_info;
-	} out;
-};
-
-struct ubcore_cmd_topo_bonding_dev {
-	struct {
-		union ubcore_eid agg_eid;
-	} in;
-	struct {
-		struct ubcore_topo_bonding_dev bonding_dev;
 	} out;
 };
 

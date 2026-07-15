@@ -125,9 +125,7 @@ static struct ubcore_tjetty *ipourma_import_jetty(struct net_device *dev,
 	struct ubcore_device *urma_dev = priv->urma_dev;
 	struct ubcore_tjetty_cfg tjetty_cfg = { 0 };
 	struct ubcore_tjetty *tjetty;
-	uint32_t ctp_en;
-
-	ctp_en = urma_dev->attr.dev_cap.feature.bs.ctp_en;
+	uint32_t ctp_en = 0;
 
 	ipourma_build_tjetty_cfg(&tjetty_cfg, dst_eid, jetty_id, eid_index, ctp_en);
 	tjetty = ubcore_import_jetty(urma_dev, &tjetty_cfg, NULL);
@@ -742,7 +740,7 @@ void ipourma_handle_tx_wc(struct net_device *dev,
 			  struct ipourma_dev_priv *priv,
 			  struct ubcore_cr *cr)
 {
-	u32 eid_idx = 0, idx = 0;
+	u32 eid_idx, idx;
 
 	if (cr->status >= IPOURMA_MAX_CR_STATUS) {
 		priv->runtime_stats.tx_stats.cqe_err++;
@@ -767,10 +765,9 @@ void ipourma_handle_tx_wc(struct net_device *dev,
 	if (unlikely(cr->local_id < IPOURMA_WELL_KNOWN_JETTY_ID ||
 		cr->local_id >= IPOURMA_MAX_EID_CNT + IPOURMA_WELL_KNOWN_JETTY_ID)) {
 		netdev_dbg(dev, "%s:%u\n",
-				   ipourma_err_desc(IPOURMA_INCORRECT_WQE_JETTY_IDX), eid_idx);
+				   ipourma_err_desc(IPOURMA_INCORRECT_WQE_JETTY_IDX), cr->local_id);
 		return;
 	}
-
 	eid_idx = cr->local_id - IPOURMA_WELL_KNOWN_JETTY_ID;
 	idx = cr->user_ctx;
 	if (IS_ERR_OR_NULL(priv->tx_ring[eid_idx]) ||
@@ -852,7 +849,7 @@ void ipourma_handle_rx_wc(struct net_device *dev,
 	if (unlikely(cr->local_id < IPOURMA_WELL_KNOWN_JETTY_ID ||
 		cr->local_id >= IPOURMA_MAX_EID_CNT + IPOURMA_WELL_KNOWN_JETTY_ID)) {
 		netdev_dbg(dev, "%s:%u\n",
-				   ipourma_err_desc(IPOURMA_INCORRECT_WQE_JETTY_IDX), eid_idx);
+				   ipourma_err_desc(IPOURMA_INCORRECT_WQE_JETTY_IDX), cr->local_id);
 		return;
 	}
 	eid_idx = cr->local_id - IPOURMA_WELL_KNOWN_JETTY_ID;

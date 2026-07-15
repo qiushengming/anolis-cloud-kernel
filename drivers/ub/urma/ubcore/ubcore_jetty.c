@@ -20,7 +20,6 @@
 #include <ub/urma/ubcore_uapi.h>
 #include <ub/urma/ubcore_jetty.h>
 #include "ubcore_connect_adapter.h"
-#include "ubcore_connect_bonding.h"
 #include "ubcore_log.h"
 #include "ubcore_priv.h"
 #include "ubcore_hash_table.h"
@@ -460,7 +459,7 @@ int ubcore_modify_jfc(struct ubcore_jfc *jfc, struct ubcore_jfc_attr *attr,
 
 	ret = dev->ops->modify_jfc(jfc, attr, udata);
 	if (ret != 0) {
-		ubcore_log_err("[DRV_ERROR]Failed to modify jfc, jfc_id:%u, ret: %d.\n",
+		ubcore_log_err_rl("[DRV_ERROR]Failed to modify jfc, jfc_id:%u, ret: %d.\n",
 			       jfc_id, ret);
 		return ret;
 	}
@@ -908,7 +907,7 @@ int ubcore_modify_jfs(struct ubcore_jfs *jfs, struct ubcore_jfs_attr *attr,
 	dev = jfs->ub_dev;
 	ret = dev->ops->modify_jfs(jfs, attr, udata);
 	if (ret != 0) {
-		ubcore_log_err("[DRV_ERROR]Failed to modify jfs, jfs_id:%u, ret: %d.\n",
+		ubcore_log_err_rl("[DRV_ERROR]Failed to modify jfs, jfs_id:%u, ret: %d.\n",
 				   jfs_id, ret);
 		return ret;
 	}
@@ -1409,7 +1408,7 @@ int ubcore_modify_jfr(struct ubcore_jfr *jfr, struct ubcore_jfr_attr *attr,
 	dev = jfr->ub_dev;
 	ret = dev->ops->modify_jfr(jfr, attr, udata);
 	if (ret != 0) {
-		ubcore_log_err("[DRV_ERROR]Failed to modify jfr, jfr_id:%u.\n",
+		ubcore_log_err_rl("[DRV_ERROR]Failed to modify jfr, jfr_id:%u.\n",
 				   jfr_id);
 		return ret;
 	}
@@ -1590,13 +1589,6 @@ struct ubcore_tjetty *ubcore_import_jfr(struct ubcore_device *dev,
 
 	if (ubcore_check_ctrlplane_compat(dev->ops->import_jfr))
 		return ubcore_import_jfr_compat(dev, cfg, udata);
-
-	if (ubcore_is_bonding_dev(dev)) {
-		if (ubcore_connect_exchange_udata_when_import_jetty(
-			    cfg, udata, true, dev) != 0) {
-			return ERR_PTR(-ENOEXEC);
-		}
-	}
 
 	tjfr = dev->ops->import_jfr(dev, cfg, udata);
 	if (IS_ERR_OR_NULL(tjfr)) {
@@ -2078,7 +2070,7 @@ static int check_jetty_check_dev_cap(struct ubcore_device *dev,
 
 	if (cfg->jetty_grp) {
 		mutex_lock(&cfg->jetty_grp->lock);
-		if (cfg->jetty_grp->jetty_cnt >= cap->max_jetty_in_jetty_grp) {
+		if (cfg->jetty_grp->jetty_cnt > cap->max_jetty_in_jetty_grp) {
 			mutex_unlock(&cfg->jetty_grp->lock);
 			ubcore_log_err(
 				"jetty_grp jetty cnt:%u, max_jetty in grp:%u.\n",
@@ -2301,7 +2293,7 @@ int ubcore_modify_jetty(struct ubcore_jetty *jetty,
 
 	ret = jetty->ub_dev->ops->modify_jetty(jetty, attr, udata);
 	if (ret != 0) {
-		ubcore_log_err("[DRV_ERROR]Failed to modify jetty, id:%u, ret: %d.\n",
+		ubcore_log_err_rl("[DRV_ERROR]Failed to modify jetty, id:%u, ret: %d.\n",
 			       jetty_id, ret);
 		return ret;
 	}
@@ -2575,13 +2567,6 @@ struct ubcore_tjetty *ubcore_import_jetty(struct ubcore_device *dev,
 
 	if (ubcore_check_ctrlplane_compat(dev->ops->import_jetty))
 		return ubcore_import_jetty_compat(dev, cfg, udata);
-
-	if (ubcore_is_bonding_dev(dev)) {
-		if (ubcore_connect_exchange_udata_when_import_jetty(
-			    cfg, udata, false, dev) != 0) {
-			return ERR_PTR(-ENOEXEC);
-		}
-	}
 
 	tjetty = dev->ops->import_jetty(dev, cfg, udata);
 	if (IS_ERR_OR_NULL(tjetty)) {
@@ -3796,8 +3781,8 @@ int ubcore_set_jetty_opt(struct ubcore_jetty *jetty, uint64_t opt, void *buf, ui
 		jetty->ub_dev->ops->set_jetty_opt == NULL || buf == NULL)
 		return -EINVAL;
 
-	ret = ubcore_check_opt_valid(NULL, g_ubcore_jetty_opt_table,
-		g_ubcore_jetty_opt_map_count, opt, len);
+	ret = ubcore_check_opt_valid(&jetty->jetty_opt.jfs_opt.jfs_opt_mask.value,
+		g_ubcore_jetty_opt_table, g_ubcore_jetty_opt_map_count, opt, len);
 	if (ret != 0) {
 		ubcore_log_err("invalid opt.\n");
 		return ret;
@@ -3835,8 +3820,8 @@ int ubcore_get_jetty_opt(struct ubcore_jetty *jetty, uint64_t opt, void *buf, ui
 		jetty->ub_dev->ops->get_jetty_opt == NULL || buf == NULL)
 		return -EINVAL;
 
-	ret = ubcore_check_opt_valid(NULL, g_ubcore_jetty_opt_table,
-		g_ubcore_jetty_opt_map_count, opt, len);
+	ret = ubcore_check_opt_valid(&jetty->jetty_opt.jfs_opt.jfs_opt_mask.value,
+		g_ubcore_jetty_opt_table, g_ubcore_jetty_opt_map_count, opt, len);
 	if (ret != 0) {
 		ubcore_log_err("invalid opt.\n");
 		return ret;
