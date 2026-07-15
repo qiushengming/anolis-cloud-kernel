@@ -22,12 +22,20 @@ enum ubagg_cmd {
 	UBAGG_CMD_CREATE_DEV,
 	UBAGG_CMD_DELETE_DEV,
 	UBAGG_CMD_GET_DEV_NAME,
+	UBAGG_CMD_GET_TOPO_INFO,
 };
 
 struct ubagg_cmd_hdr {
 	uint32_t command;
 	uint32_t args_len;
 	uint64_t args_addr;
+};
+
+struct ubagg_get_topo_info_arg {
+	struct {
+		void *topo;
+		uint32_t topo_num;
+	} out;
 };
 
 #define UBAGG_CMD_MAGIC 'B'
@@ -101,6 +109,7 @@ struct ubagg_device_cap {
 	uint32_t max_fetch_and_xor_size;
 	union ubcore_atomic_feat atomic_feat;
 	uint16_t trans_mode; /* one or more from ubcore_transport_mode_t */
+	uint16_t reserved;
 	uint16_t congestion_ctrl_alg; /* one or more mode from ubcore_congestion_ctrl_alg_t */
 	uint32_t ceq_cnt; /* completion vector count */
 	uint32_t max_tp_in_tpg;

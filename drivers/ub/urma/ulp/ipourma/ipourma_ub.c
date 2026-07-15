@@ -371,7 +371,6 @@ static int ipourma_update_wr(struct net_device *dev, struct ipourma_tx_buf *tx_r
 			priv->runtime_stats.tx_stats.num_import_jetty_real++;
 			tjetty_new = ipourma_import_new_tjetty(priv, tx_req);
 			if (IS_ERR_OR_NULL(tjetty_new)) {
-				ipourma_advance_tx_tail(priv, tx_req);
 				priv->runtime_stats.tx_stats.import_jetty_failed++;
 				return IPOURMA_TJETTY_NODE_ALLOC_FAILED;
 			}
@@ -395,6 +394,9 @@ void ipourma_post_send(struct work_struct *work)
 	struct ipourma_dev_priv *priv = tx_req->priv;
 	int ret;
 	struct ubcore_jfs_wr *jfs_bad_wr = NULL;
+
+	if (!test_bit(IPOURMA_DEV_ADMIN_UP, &priv->flags))
+		return;
 
 	priv->runtime_stats.tx_stats.post_send_start++;
 	pr_debug("post_send start, idx %u, jetty %u\n", tx_req->idx, tx_req->eid_index);

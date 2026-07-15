@@ -66,7 +66,8 @@ static uint32_t ubmad_reliable_hash(uint64_t msn, uint32_t msg_type, uint32_t si
 }
 
 static struct ubmad_msn_node *
-ubmad_create_msn_node(uint64_t msn, uint32_t msg_type, struct ubmad_msn_mgr *msn_mgr)
+ubmad_create_msn_node(uint64_t msn, uint32_t msg_type,
+		      struct ubmad_msn_mgr *msn_mgr, bool use_lru)
 {
 	struct ubmad_msn_node *msn_node;
 	unsigned long flag;
@@ -78,13 +79,15 @@ ubmad_create_msn_node(uint64_t msn, uint32_t msg_type, struct ubmad_msn_mgr *msn
 
 	msn_node->msn = msn;
 	msn_node->msg_type = msg_type;
+	msn_node->rt_work = NULL;
 	INIT_HLIST_NODE(&msn_node->node);
 	INIT_LIST_HEAD(&msn_node->lru_node);
 
 	hash = ubmad_reliable_hash(msn, msg_type, UBMAD_MSN_HLIST_SIZE);
 	spin_lock_irqsave(&msn_mgr->msn_hlist_lock, flag);
 	hlist_add_head(&msn_node->node, &msn_mgr->msn_hlist[hash]);
-	list_add_tail(&msn_node->lru_node, &msn_mgr->msn_lru_list);
+	if (use_lru)
+		list_add_tail(&msn_node->lru_node, &msn_mgr->msn_lru_list);
 	atomic_inc(&msn_mgr->cnt);
 	spin_unlock_irqrestore(&msn_mgr->msn_hlist_lock, flag);
 
@@ -152,7 +155,8 @@ static bool ubmad_check_recv_msn_duplicate(struct ubmad_msn_mgr *msn_mgr,
 
 	if (atomic_read(&msn_mgr->cnt) > UBMAD_RECV_MSN_MAX) {
 		spin_lock_irqsave(&msn_mgr->msn_hlist_lock, flag);
-		cur = list_first_entry(&msn_mgr->msn_lru_list, struct ubmad_msn_node, lru_node);
+		cur = list_first_entry_or_null(
+			&msn_mgr->msn_lru_list, struct ubmad_msn_node, lru_node);
 		if (!IS_ERR_OR_NULL(cur)) {
 			hlist_del(&cur->node);
 			list_del(&cur->lru_node);
@@ -489,6 +493,7 @@ static void ubmad_rt_work_handler(struct work_struct *work)
 	uint32_t hash = ubmad_reliable_hash(rt_work->msn, rt_work->msg_type,
 			UBMAD_MSN_HLIST_SIZE);
 	bool found = false;
+	struct ubmad_tjetty *tjetty;
 
 	spin_lock_irqsave(&msn_mgr->msn_hlist_lock, flag);
 	hlist_for_each_entry_safe(cur, next, &msn_mgr->msn_hlist[hash], node) {
@@ -532,11 +537,12 @@ clear_rt_work:
 	spin_unlock_irqrestore(&msn_mgr->msn_hlist_lock, flag);
 
 stop_retransmit:
+	tjetty = ubmad_get_tjetty(dst, rsrc);
 
-	struct ubmad_tjetty *tjetty = ubmad_get_tjetty(dst, rsrc);
-
-	if (!IS_ERR_OR_NULL(tjetty))
+	if (!IS_ERR_OR_NULL(tjetty)) {
 		ubmad_release_ini_rtbuffer(tjetty, rt_work->msn, rt_work->msg_type);
+		return;
+	}
 
 	ubcore_log_info_rl("Do not repost, found: %u, rt_work->rt_cnt: %u.\n",
 		      (uint32_t)found, rt_work->rt_cnt);
@@ -594,7 +600,7 @@ static int ubmad_prepare_msg(uint64_t sge_addr, struct ubmad_send_buf *send_buf,
 		return -EINVAL;
 	}
 
-	msg->version = UBMAD_MSG_VERSION_0;
+	msg->version = UBMAD_MSG_CUR_VERSION;
 	msg->msn = msn;
 	msg->msg_type = send_buf->msg_type;
 	msg->payload_len = send_buf->payload_len;
@@ -627,7 +633,7 @@ static int ubmad_do_post_send_wk1_gen_data(struct ubcore_jetty *jetty,
 
 	int ret;
 
-	msn_node = ubmad_create_msn_node(msn, UBMAD_GEN_DATA, &tjetty->msn_mgr);
+	msn_node = ubmad_create_msn_node(msn, UBMAD_GEN_DATA, &tjetty->msn_mgr, false);
 	if (IS_ERR_OR_NULL(msn_node)) {
 		ubcore_log_err("create msn_node failed. msn %llu eid " EID_FMT
 			     "\n", msn, EID_ARGS(*dst_eid));
@@ -718,7 +724,7 @@ static int ubmad_do_post_send_wk0_conn_data(struct ubcore_jetty *jetty,
 	/* create msn_node before post to avoid recv ack before msn_node created and wrongly trigger
 	 * fast retransmission.
 	 */
-	msn_node = ubmad_create_msn_node(msn, UBMAD_UBC_CONN_REQ, &tjetty->msn_mgr);
+	msn_node = ubmad_create_msn_node(msn, UBMAD_UBC_CONN_REQ, &tjetty->msn_mgr, false);
 	if (IS_ERR_OR_NULL(msn_node)) {
 		ubcore_log_err("create msn_node failed. msn %llu eid " EID_FMT
 			     "\n",
@@ -746,20 +752,30 @@ static int ubmad_do_post_send_wk0_conn_data(struct ubcore_jetty *jetty,
 			&tjetty->msn_mgr, msn, UBMAD_UBC_CONN_REQ,
 			tjetty->tjetty->cfg.id.eid, rsrc);
 
-	if (IS_ERR_OR_NULL(rt_work))
+	if (IS_ERR_OR_NULL(rt_work)) {
 		ubcore_log_err("Failed to create the first rt_work. msn %llu.\n", msn);
-	else if (pld_len <= UBMAD_RTBUFFER_PKTSIZE) {
-		struct ubmad_ini_rtbuffer *rtbuffer = ubmad_create_ini_rtbuffer(tjetty, msn,
-								      UBMAD_UBC_CONN_REQ);
+	} else {
+		msn_node->rt_work = rt_work;
+		if (pld_len <= UBMAD_RTBUFFER_PKTSIZE) {
+			struct ubmad_ini_rtbuffer *rtbuffer = ubmad_create_ini_rtbuffer(tjetty, msn,
+									      UBMAD_UBC_CONN_REQ);
 
-		if (IS_ERR_OR_NULL(rtbuffer))
-			ubcore_log_err("Failed to create rtbuffer.\n");
-		else {
-			rtbuffer->payload_len = pld_len;
-			memcpy(rtbuffer->data, (void *)sge_addr, pld_len);
+			if (IS_ERR_OR_NULL(rtbuffer)) {
+				ubcore_log_err("Failed to create rtbuffer.\n");
+				msn_node->rt_work = NULL;
+				cancel_delayed_work_sync(&rt_work->delay_work);
+				kfree(rt_work);
+			} else {
+				rtbuffer->payload_len = pld_len;
+				memcpy(rtbuffer->data, (void *)sge_addr, pld_len);
+			}
+		} else {
+			ubcore_log_err("Failed to create rtbuffer, packet size too large.\n");
+			msn_node->rt_work = NULL;
+			cancel_delayed_work_sync(&rt_work->delay_work);
+			kfree(rt_work);
 		}
-	} else
-		ubcore_log_err("Failed to create rtbuffer, packet size too large.\n");
+	}
 
 	ubcore_log_info_rl("send conn data successfully. msn %llu eid " EID_FMT "\n",
 		      msn, EID_ARGS(*dst_eid));
@@ -860,7 +876,7 @@ static int ubmad_do_post_send_wk1_gen_resp(struct ubcore_jetty *jetty,
 		struct ubmad_rt_work *rt_work;
 		struct ubmad_ini_rtbuffer *rtbuffer;
 
-		msn_node = ubmad_create_msn_node(msn, UBMAD_GEN_RESP, &tjetty->msn_mgr);
+		msn_node = ubmad_create_msn_node(msn, UBMAD_GEN_RESP, &tjetty->msn_mgr, false);
 		if (IS_ERR_OR_NULL(msn_node)) {
 			ubcore_log_err("create msn_node for gen resp failed. msn %llu\n", msn);
 			goto gen_resp_out;
@@ -1114,15 +1130,11 @@ int ubmad_post_send(struct ubcore_device *device,
 
 	/* import well-known jetty */
 	// unimport in ubmad_uninit_jetty_rsrc()
-	ubcore_log_err("lookup primary eid for dst eid " EID_FMT "\n",
-		     EID_ARGS(send_buf->dst_eid));
 	ret = ubcore_lookup_main_ue_eid(&send_buf->dst_eid, &dst_primary_eid);
 	if (ret != 0) {
 		ubcore_log_err("get primary eid failed, ret = %d\n", ret);
 		goto put_device_priv;
 	}
-	ubcore_log_err("dst_primary_eid " EID_FMT "\n",
-		     EID_ARGS(dst_primary_eid));
 	hash = jhash(&dst_primary_eid, sizeof(union ubcore_eid), 0) %
 		UBMAD_MAX_TJETTY_NUM;
 	spin_lock_irqsave(&rsrc->tjetty_hlist_lock, flag);
@@ -1131,6 +1143,8 @@ int ubmad_post_send(struct ubcore_device *device,
 	if (!IS_ERR_OR_NULL(tjetty)) {
 		ubcore_log_info_rl("tjetty0 already imported. eid " EID_FMT "\n",
 			EID_ARGS(dst_primary_eid));
+
+		ubcore_log_info_rl("tjetty0 imported, vtpn: %u\n", tjetty->tjetty->vtpn->vtpn);
 		/* post send */
 		ret = ubmad_do_post_send(
 			rsrc, tjetty, send_buf,
@@ -1211,7 +1225,7 @@ static int ubmad_post_send_gen_ack(struct ubmad_jetty_resource *rsrc,
 
 	sge_addr = rsrc->send_seg->seg.ubva.va + UBMAD_SGE_MAX_LEN * sge_idx;
 	msg = (struct ubmad_msg *)sge_addr;
-	msg->version = UBMAD_MSG_VERSION_0;
+	msg->version = UBMAD_MSG_CUR_VERSION;
 	msg->msg_type = UBMAD_GEN_ACK;
 	msg->payload_len = 0;
 	msg->reserved = acked_msg_type;
@@ -1267,7 +1281,7 @@ void ubmad_post_send_close_req(struct ubmad_jetty_resource *rsrc,
 
 	sge_addr = rsrc->send_seg->seg.ubva.va + UBMAD_SGE_MAX_LEN * sge_idx;
 	msg = (struct ubmad_msg *)sge_addr;
-	msg->version = UBMAD_MSG_VERSION_0;
+	msg->version = UBMAD_MSG_CUR_VERSION;
 	msg->msg_type = UBMAD_CLOSE_REQ;
 	msg->payload_len = 0;
 	msg->msn = 0; // UBMAD_CLOSE_REQ is unreliable, msn does not work
@@ -1464,7 +1478,6 @@ static int ubmad_process_conn_ack(struct ubcore_cr *cr,
 			rt_work = cur->rt_work;
 			cur->rt_work = NULL;
 			hlist_del(&cur->node);
-			list_del(&cur->lru_node);
 			atomic_dec(&msn_mgr->cnt);
 			spin_unlock_irqrestore(&msn_mgr->msn_hlist_lock, flag);
 			kfree(cur);
@@ -1522,9 +1535,18 @@ static int ubmad_process_conn_resp(struct ubcore_cr *cr,
 	spin_lock_irqsave(&msn_mgr->msn_hlist_lock, flag);
 	hlist_for_each_entry_safe(cur, next, &msn_mgr->msn_hlist[hash], node) {
 		if (cur->msn == msg->msn && cur->msg_type == UBMAD_UBC_CONN_REQ) {
+			struct ubmad_rt_work *rt_work = cur->rt_work;
+
+			cur->rt_work = NULL;
 			hlist_del(&cur->node);
+			atomic_dec(&msn_mgr->cnt);
 			kfree(cur);
 			spin_unlock_irqrestore(&msn_mgr->msn_hlist_lock, flag);
+			if (rt_work) {
+				cancel_delayed_work_sync(&rt_work->delay_work);
+				kfree(rt_work);
+				ubmad_release_ini_rtbuffer(tjetty, msg->msn, UBMAD_UBC_CONN_REQ);
+			}
 			goto effective_resp;
 		}
 	}
@@ -1593,6 +1615,12 @@ static int ubmad_process_msg(struct ubcore_cr *cr,
 		ubcore_log_err(
 			"even header is incomplete. completion_len %u < header size %lu\n",
 			cr->completion_len, sizeof(struct ubmad_msg));
+		return -EINVAL;
+	}
+	if (msg->version != UBMAD_MSG_CUR_VERSION) {
+		ubcore_log_err_rl(
+			"Unsupported msg version, recv request version %u, current version %u.\n",
+			msg->version, UBMAD_MSG_CUR_VERSION);
 		return -EINVAL;
 	}
 	if (cr->completion_len != sizeof(struct ubmad_msg) + msg->payload_len) {
@@ -1746,7 +1774,6 @@ static void ubmad_send_work_handler(struct ubmad_device_priv *dev_priv,
 	} while (cr_cnt > 0);
 
 	ret = ubcore_rearm_jfc(jfc, false);
-	ubcore_log_info_rl("Rearm send jfc, jfc_id: %u, ret: %d.\n", jfc->id, ret);
 }
 
 // polling here indicates if recv msg
@@ -1766,7 +1793,7 @@ static void ubmad_recv_work_handler(struct ubmad_device_priv *dev_priv,
 	if (IS_ERR_OR_NULL(rsrc)) {
 		ubcore_log_err("Failed to match jfc for recv.\n");
 		return;
-	}
+	};
 
 	do {
 		cr_cnt = ubcore_poll_jfc(jfc, 1, &cr);
@@ -1809,10 +1836,8 @@ static void ubmad_recv_work_handler(struct ubmad_device_priv *dev_priv,
 	} while (cr_cnt > 0);
 
 	ret = ubcore_rearm_jfc(jfc, false);
-	ubcore_log_info_rl("Rearm recv jfc, jfc_id: %u, ret: %d.\n", jfc->id, ret);
 }
 
-// continue from ubmad_jfce_handler()
 static void ubmad_jfce_work_handler(struct work_struct *work)
 {
 	struct ubmad_jfce_work *jfce_work =

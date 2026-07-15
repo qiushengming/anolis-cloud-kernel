@@ -109,11 +109,15 @@ int ubcore_cm_recv(struct ubcore_device *dev, struct ubcore_cm_recv_cr *recv_cr)
 	struct ubcore_comm_msg msg = { 0 };
 	struct ubcore_comm_endpoint *ep;
 
-	if (recv_cr->payload != 0 && recv_cr->payload_len < MSG_HDR_SIZE) {
+	if (recv_cr->payload == 0 || recv_cr->payload_len < MSG_HDR_SIZE) {
 		ubcore_log_err("Invalid recv_cr payload");
 		return -EINVAL;
 	}
 	(void)memcpy(&msg, (void *)(recv_cr->payload), MSG_HDR_SIZE);
+	if (msg.len > recv_cr->payload_len - MSG_HDR_SIZE) {
+		ubcore_log_err("Invalid recv_cr payload len");
+		return -EINVAL;
+	}
 	msg.data = (void *)(recv_cr->payload + MSG_HDR_SIZE);
 
 	ubcore_log_info("Handle cm message, " MSG_FMT, MSG_ARG(&msg));
@@ -174,7 +178,9 @@ static int ubcore_ubcm_service_connect_send_to(struct ubcore_comm_msg *msg,
 		send_buf->msg_type = UBCORE_CM_CONN_REQ;
 	else if (msg->type == UBCORE_NET_CREATE_RESP)
 		send_buf->msg_type = UBCORE_CM_CONN_RESP;
-	else if (msg->type == UBCORE_NET_DESTROY_REQ || msg->type == UBCORE_NET_DESTROY_RESP)
+	else if (msg->type == UBCORE_NET_DESTROY_REQ ||
+			 msg->type == UBCORE_NET_DESTROY_RESP ||
+			 msg->type == UBCORE_NET_ISREF_REQ)
 		send_buf->msg_type = UBCORE_CM_SINGLE_REQ;
 	else {
 		ubcore_log_err("Connect service, Unrecognized msg type %u\n", msg->type);

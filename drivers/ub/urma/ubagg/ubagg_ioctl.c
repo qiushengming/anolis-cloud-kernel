@@ -1266,10 +1266,13 @@ static int ubagg_update_topo_info(struct ubagg_topo_map *new_topo_map,
 	}
 
 	for (i = 0; i < new_topo_map->node_num; i++) {
+		bool found = false;
+
 		new_node = &new_topo_map->topo_infos[i];
 		for (j = 0; j < old_topo_map->node_num; j++) {
 			old_node = &old_topo_map->topo_infos[j];
 			if (new_node->node_id == old_node->node_id) {
+				found = true;
 				if (update_link_info(new_node, old_node)) {
 					ubagg_log_err("update link info fail.");
 					return -EINVAL;
@@ -1278,7 +1281,17 @@ static int ubagg_update_topo_info(struct ubagg_topo_map *new_topo_map,
 					ubagg_log_err("update dev info fail.");
 					return -EINVAL;
 				}
+				break;
 			}
+		}
+		if (!found) {
+			if (old_topo_map->node_num >= MAX_NODE_NUM) {
+				ubagg_log_err("topo map is full\n");
+				return -ENOSPC;
+			}
+			(void)memcpy(&old_topo_map->topo_infos[old_topo_map->node_num],
+				     new_node, sizeof(*new_node));
+			old_topo_map->node_num++;
 		}
 	}
 
@@ -1735,6 +1748,60 @@ static int ubagg_cmd_set_topo_info(struct ubagg_cmd_hdr *hdr)
 	return 0;
 }
 
+static int ubagg_cmd_get_topo_info(struct ubagg_cmd_hdr *hdr)
+{
+	struct ubagg_topo_info_out *topo_info_out = NULL;
+	struct ubagg_get_topo_info_arg __user *uarg =
+		(void __user *)hdr->args_addr;
+	struct ubagg_get_topo_info_arg arg;
+	int ret;
+
+	if (hdr->args_len != sizeof(struct ubagg_get_topo_info_arg)) {
+		ubagg_log_err(
+			"get topo info, args_len is invalid, args_len:%u\n",
+			hdr->args_len);
+		return -EINVAL;
+	}
+
+	ret = copy_from_user(&arg, (void __user *)hdr->args_addr,
+			     hdr->args_len);
+	if (ret != 0) {
+		ubagg_log_err("copy_from_user fail.");
+		return -EFAULT;
+	}
+	if (arg.out.topo == NULL) {
+		ubagg_log_err("Invalid get_topo_info param\n");
+		return -EINVAL;
+	}
+
+	topo_info_out = get_topo_info();
+	if (!topo_info_out) {
+		ubagg_log_err("ubagg topo info does not exist\n");
+		return -ENXIO;
+	}
+
+	ret = copy_to_user((void __user *)arg.out.topo,
+			   (void *)topo_info_out->topo_info,
+			   sizeof(struct ubagg_topo_node) *
+			   topo_info_out->node_num);
+	if (ret != 0) {
+		ubagg_log_err("copy to user fail, ret:%d", ret);
+		vfree(topo_info_out);
+		return -EFAULT;
+	}
+
+	arg.out.topo_num = topo_info_out->node_num;
+	ret = copy_to_user(&uarg->out.topo_num, &arg.out.topo_num,
+			   sizeof(arg.out.topo_num));
+	vfree(topo_info_out);
+	if (ret != 0) {
+		ubagg_log_err("copy topo num to user fail, ret:%d", ret);
+		return -EFAULT;
+	}
+
+	return 0;
+}
+
 void ubagg_delete_topo_map(void)
 {
 	delete_global_ubagg_topo_map();
@@ -1743,7 +1810,7 @@ void ubagg_delete_topo_map(void)
 static int ubagg_create_dev(struct ubagg_create_dev_arg *arg)
 {
 	struct ubagg_add_dev_by_uvs uvs_arg = {0};
-	struct ubagg_topo_agg_dev *agg_dev;
+	struct ubagg_topo_agg_dev *agg_dev = NULL;
 	struct ubagg_topo_node *cur_node;
 	struct ubagg_topo_map *topo_map;
 	uint32_t dev_name_len = 0;
@@ -1920,7 +1987,7 @@ static struct ubagg_device *ubagg_find_dev_by_agg_eid(const char *agg_eid)
 
 static int ubagg_delete_dev(const struct ubagg_delete_dev_arg *arg)
 {
-	struct ubagg_topo_agg_dev *agg_dev;
+	struct ubagg_topo_agg_dev *agg_dev = NULL;
 	struct ubagg_topo_node *cur_node;
 	struct ubagg_topo_map *topo_map;
 	struct ubagg_device *dev;
@@ -2082,6 +2149,8 @@ long ubagg_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		return 0;
 	case UBAGG_CMD_SET_TOPO_INFO:
 		return ubagg_cmd_set_topo_info(&hdr);
+	case UBAGG_CMD_GET_TOPO_INFO:
+		return ubagg_cmd_get_topo_info(&hdr);
 	case UBAGG_CMD_CREATE_DEV:
 		return ubagg_cmd_create_dev(&hdr);
 	case UBAGG_CMD_DELETE_DEV:

@@ -696,6 +696,13 @@ int ubcore_deactive_jetty(struct ubcore_jetty *jetty, struct ubcore_udata *udata
  */
 int ubcore_free_jetty(struct ubcore_jetty *jetty, struct ubcore_udata *udata);
 
+/**
+ * import jfr to ubcore device.
+ * @param[in] dev: the ubcore device handle;
+ * @param[in] cfg: remote jfr attributes and import configurations;
+ * @param[in] udata (optional): ucontext and user space driver data
+ * @return: target jfr pointer on success, NULL on error
+ */
 struct ubcore_tjetty *ubcore_import_jfr(struct ubcore_device *dev,
 					struct ubcore_tjetty_cfg *cfg,
 					struct ubcore_udata *udata);
@@ -760,6 +767,8 @@ int ubcore_unimport_jetty(struct ubcore_tjetty *tjetty);
  */
 int ubcore_bind_jetty(struct ubcore_jetty *jetty, struct ubcore_tjetty *tjetty,
 		      struct ubcore_udata *udata);
+
+int ubcore_delete_tpid(struct ubcore_device *dev, struct ubcore_tpid *tpid);
 
 /**
  * Bind jetty: Bind local jetty with remote jetty, and construct a transport channel between them.
@@ -861,6 +870,8 @@ int ubcore_unbind_jetty_async(struct ubcore_jetty *jetty, int timeout,
 int ubcore_get_tp_list(struct ubcore_device *dev, struct ubcore_get_tp_cfg *cfg,
 				uint32_t *tp_cnt, struct ubcore_tp_info *tp_list,
 				struct ubcore_udata *udata);
+struct ubcore_tpid *ubcore_create_tpid(struct ubcore_device *dev,
+	struct ubcore_tpid_cfg *cfg, struct ubcore_udata *udata);
 
 /**
  * set tp attributions by control plane.
@@ -1190,5 +1201,8 @@ int ubcore_send_comm_msg(struct ubcore_device *dev, struct ubcore_comm_msg *msg,
  */
 int ubcore_send_comm_msg_to(struct ubcore_device *dev,
 			    struct ubcore_comm_msg *msg, union ubcore_eid addr);
+
+bool ubcore_dev_ns_shared(void);
+bool ubcore_eid_ns_shared(void);
 
 #endif
