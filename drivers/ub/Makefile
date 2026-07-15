@@ -2,6 +2,7 @@
 
 obj-y += ubus/
 obj-y += ubfi/
+obj-y += obmm/
 obj-$(CONFIG_UB_UBASE) += ubase/
 obj-$(CONFIG_UB_CDMA) += cdma/
 obj-$(CONFIG_UB_UBDEVSHM) += ubdevshm/
