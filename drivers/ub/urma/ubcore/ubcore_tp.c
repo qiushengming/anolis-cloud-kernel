@@ -31,7 +31,7 @@ int ubcore_check_tp_type_valid(enum ubcore_transport_mode trans_mode, uint32_t t
 {
 	if ((trans_mode != UBCORE_TP_UM && tp_mode == UBCORE_UTP) ||
 		(trans_mode == UBCORE_TP_UM && tp_mode == UBCORE_RTP)) {
-		ubcore_log_err("setting of UTP or UM is conflit with anther setting, transmode is %d, tpmode is %d",
+		ubcore_log_err_rl("UTP/UM setting conflict, transmode=%d, tpmode=%d",
 						trans_mode, tp_mode);
 		return -1;
 	}
@@ -49,7 +49,7 @@ static void ubcore_tpid_list_kref_release(struct kref *ref_cnt)
 void ubcore_tpid_list_kref_put(struct ubcore_tpid_list *tpid_list)
 {
 	if (tpid_list == NULL) {
-		ubcore_log_err("tpid_list is NULL");
+		ubcore_log_err_rl("tpid_list is NULL");
 		return;
 	}
 	(void)kref_put(&tpid_list->ref_cnt, ubcore_tpid_list_kref_release);
@@ -64,11 +64,6 @@ void ubcore_tpid_list_get(void *obj)
 static int ubcore_free_tpid_list(struct ubcore_tpid_list *tpid_list)
 {
 	struct ubcore_tpid_list_node *entry, *next;
-
-	if (tpid_list == NULL) {
-		ubcore_log_err("tpid_list is NULL");
-		return -EINVAL;
-	}
 
 	list_for_each_entry_safe(entry, next, &tpid_list->create_list, node) {
 		list_del(&entry->node);
@@ -154,7 +149,7 @@ int validate_get_tp_cfg(struct ubcore_get_tp_cfg *cfg)
 	if (cfg->flag.bs.ctp) {
 		tp_type = UBCORE_CTP;
 		if (cfg->flag.bs.uboe) {
-			ubcore_log_err("Tp type ctp and uboe conflict.\n");
+			ubcore_log_err_rl("Tp type ctp and uboe conflict.\n");
 			return -EINVAL;
 		}
 	}
@@ -207,32 +202,50 @@ static int ubcore_update_tpid_list(struct ubcore_device *dev,
 	int ret;
 	uint32_t idx;
 	uint32_t new_cnt = 0;
-	struct ubcore_tpid_list_node *node;
+	struct ubcore_tpid_list_node *node, *tmp;
+	LIST_HEAD(new_list);
 
 	new_cnt = actual_total_tp_cnt - tpid_list->cnt;
 
 	for (idx = tpid_list->cnt; idx < actual_total_tp_cnt; idx++) {
 		node = kcalloc(1, sizeof(struct ubcore_tpid_list_node), GFP_KERNEL);
 		if (node == NULL)
-			return -ENOMEM;
+			goto err_free_new_list;
 		node->tp_info = ops_tp_list[idx];
 		node->tp_info.tp_handle.bs.trans_mode = cfg->trans_mode;
 		node->tp_info.tp_handle.bs.ctp = cfg->flag.bs.ctp;
 		node->tp_info.tp_handle.bs.rtp = cfg->flag.bs.rtp;
 		node->tp_info.tp_handle.bs.utp = cfg->flag.bs.utp;
 		node->tp_info.tp_handle.bs.uboe = cfg->flag.bs.uboe;
-		list_add_tail(&node->node, &tpid_list->create_list);
+		list_add_tail(&node->node, &new_list);
 	}
 
+	list_splice_tail(&new_list, &tpid_list->create_list);
 	tpid_list->cnt += new_cnt;
 
 	ret = init_state_for_tpid(dev, tpid_list,
 				  tpid_list->cnt - new_cnt, tpid_list->cnt);
-	if (ret != 0)
-		ubcore_log_err("Failed to init state for tpid list, ret = %d.\n", ret);
+	if (ret != 0) {
+		tpid_list->cnt -= new_cnt;
+		while (new_cnt-- > 0) {
+			node = list_last_entry(&tpid_list->create_list,
+				struct ubcore_tpid_list_node, node);
+			list_del(&node->node);
+			kfree(node);
+		}
+		ubcore_log_err_rl("Failed to init state for tpid list, ret = %d.\n", ret);
+		return ret;
+	}
 
 	ubcore_log_info("Update tpid list success, cnt = %d.\n", tpid_list->cnt);
 	return 0;
+
+err_free_new_list:
+	list_for_each_entry_safe(node, tmp, &new_list, node) {
+		list_del(&node->node);
+		kfree(node);
+	}
+	return -ENOMEM;
 }
 
 static int ubcore_get_tp_list_from_ops(struct ubcore_device *dev,
@@ -273,9 +286,9 @@ static int ubcore_get_tp_list_from_ops(struct ubcore_device *dev,
 				ret = 0;
 				break;
 			}
-			ubcore_log_err("get tp list failed: total=%d idx=%d\n",
+			ubcore_log_err_rl("get tp list failed: total=%d idx=%d\n",
 				req_total_tp_cnt, group_idx);
-			ubcore_log_err("req=%d actual=%d ret=%d.\n",
+			ubcore_log_err_rl("req=%d actual=%d ret=%d.\n",
 				req_group_tp_cnt, actual_group_tp_cnt, ret);
 			return ret;
 		}
@@ -312,21 +325,21 @@ static int ubcore_get_tp_list_helper(struct ubcore_device *dev, struct ubcore_ge
 
 	ret = ubcore_get_tp_list_from_ops(dev, cfg, &req_cnt, temp_buf, udata);
 	if (ret != 0) {
-		ubcore_log_err("Get tp list from ops failed, ret = %d.\n", ret);
+		ubcore_log_err_rl("Get tp list from ops failed, ret = %d.\n", ret);
 		kfree(temp_buf);
 		return -EINVAL;
 	}
 
-	ubcore_log_info("Get tp list from ops success, cnt=%d, ret=%d.\n", req_cnt, ret);
+	ubcore_log_info_rl("Get tp list from ops success, cnt=%d, ret=%d.\n", req_cnt, ret);
 	if (req_cnt > old_total_cnt) {
 		ret = ubcore_update_tpid_list(dev, temp_buf, tpid_list, req_cnt, cfg);
 		if (ret != 0) {
-			ubcore_log_err("Update tpid list failed, ret = %d.\n", ret);
+			ubcore_log_err_rl("Update tpid list failed, ret = %d.\n", ret);
 			kfree(temp_buf);
 			return -EINVAL;
 		}
 	} else {
-		ubcore_log_err("Tp_cnt is not increased, old_cnt: %u, new_cnt: %d.\n",
+		ubcore_log_err_rl("Tp_cnt is not increased, old_cnt: %u, new_cnt: %d.\n",
 			old_total_cnt, req_cnt);
 		kfree(temp_buf);
 		return -EINVAL;
@@ -334,7 +347,7 @@ static int ubcore_get_tp_list_helper(struct ubcore_device *dev, struct ubcore_ge
 
 	// get tp list from list last entry
 	if (list_empty(&tpid_list->create_list)) {
-		ubcore_log_err("Tpid list head is empty after get tp list from ops.\n");
+		ubcore_log_err_rl("Tpid list head is empty after get tp list from ops.\n");
 		kfree(temp_buf);
 		return -EINVAL;
 	}
@@ -358,7 +371,7 @@ int ubcore_get_tp_list(struct ubcore_device *dev, struct ubcore_get_tp_cfg *cfg,
 	if (validate_get_tp_cfg(cfg) != 0)
 		return -EINVAL;
 	if (ubcore_check_trans_mode_valid(cfg->trans_mode) != true) {
-		ubcore_log_err("Invalid parameter, trans_mode = %d.\n", (int)cfg->trans_mode);
+		ubcore_log_err_rl("Invalid parameter, trans_mode = %d.\n", (int)cfg->trans_mode);
 		return -EINVAL;
 	}
 
@@ -379,12 +392,12 @@ int ubcore_get_tp_list(struct ubcore_device *dev, struct ubcore_get_tp_cfg *cfg,
 		ret = ubcore_create_tpid_priv(dev, &tpid_cfg, udata, &tp_handle);
 		if (ret != 0) {
 			if (actual_total_tp_cnt > 0) {
-				ubcore_log_err(
+				ubcore_log_err_rl(
 					"tpid num is insufficient, early end, actual_total_tp_cnt: %d.\n",
 					actual_total_tp_cnt);
 				goto success;
 			}
-			ubcore_log_err("Failed to create tpid for tp_list.\n");
+			ubcore_log_err_rl("Failed to create tpid for tp_list.\n");
 			return -ENOMEM;
 		}
 		tp_list[idx].tp_handle.value = tp_handle.value;
@@ -424,7 +437,7 @@ static struct ubcore_tp_info *find_available_tp_id_nolock(struct ubcore_device *
 			state->tpid_status, state->alloced);
 		mutex_lock(&state->lock);
 		if (state->tpid_status != UBCORE_TPID_STATE_ERR && !state->alloced) {
-			ubcore_log_info_rl("find available tp handle value: %lld.\n",
+			ubcore_log_info_rl("find available tp handle value: %llu.\n",
 				tp_info->tp_handle.value);
 			state->alloced = true;
 			mutex_unlock(&state->lock);
@@ -490,14 +503,18 @@ static int init_state_for_tpid(struct ubcore_device *dev,
 		tpid = entry->tp_info.tp_handle.bs.tpid;
 		state = make_tpid_state(dev, tpid_list, tpid, UBCORE_TPID_STATE_RESET);
 		if (state == NULL) {
-			ubcore_log_err("Failed to alloc tpid state entry.\n");
+			ubcore_log_err_rl("Failed to alloc tpid state entry.\n");
 			ret = -ENOMEM;
 			goto rollback;
 		}
 		ret = ubcore_find_add_tp_id_state_entry(dev, state);
 		if (ret != 0) {
-			ubcore_log_err("Failed to add tpid state, tpid=%u, ret=%d.\n",
+			ubcore_log_err_rl("Failed to add tpid state, tpid=%u, ret=%d.\n",
 				tpid, ret);
+			ubcore_tpid_state_kref_put(state);
+			wait_for_completion(&state->comp);
+			mutex_destroy(&state->lock);
+			kfree(state);
 			goto rollback;
 		}
 		ubcore_log_info_rl("init tpid state success, i=%d, tpid=%u, ret=%d.\n",
@@ -508,7 +525,7 @@ static int init_state_for_tpid(struct ubcore_device *dev,
 	return 0;
 
 rollback:
-	rollback = begin;
+	rollback = 0;
 	list_for_each_entry(entry, &tpid_list->create_list, node) {
 		if (rollback < begin) {
 			rollback++;
@@ -522,6 +539,8 @@ rollback:
 			ubcore_log_err_rl("Failed to find state of tpid = %u.\n", tpid);
 			break;
 		}
+
+		ubcore_tpid_state_kref_put(state);
 		ubcore_remove_tp_id_state_entry(dev, state);
 		ubcore_log_info_rl("delete tp id state in init state rollback.\n");
 		rollback++;
@@ -635,7 +654,7 @@ int ubcore_create_tpid_priv(struct ubcore_device *dev, struct ubcore_tpid_cfg *c
 	if (validate_get_tp_cfg(&get_cfg) != 0)
 		return -1;
 	if (ubcore_check_trans_mode_valid(get_cfg.trans_mode) != true) {
-		ubcore_log_err("Invalid parameter, tp_mode: %d.\n", (int)cfg->tp_mode);
+		ubcore_log_err_rl("Invalid parameter, tp_mode: %d.\n", (int)cfg->tp_mode);
 		return -1;
 	}
 
@@ -646,7 +665,7 @@ int ubcore_create_tpid_priv(struct ubcore_device *dev, struct ubcore_tpid_cfg *c
 	}
 
 	*tp_handle = selected.tp_handle;
-	ubcore_log_info_rl("create tpid handle value = %lld.\n", selected.tp_handle.value);
+	ubcore_log_info_rl("create tpid handle value = %llu.\n", selected.tp_handle.value);
 
 	return 0;
 }
@@ -818,6 +837,10 @@ int ubcore_modify_tpid(struct ubcore_device *dev, enum ubcore_tpid_status state,
 	}
 
 	if (state == UBCORE_TPID_STATE_RESET) {
+		if (cfg->flushdone_cfg == NULL) {
+			ubcore_log_err("Invalid parameter for RESET state.\n");
+			return -EINVAL;
+		}
 		tp_id = cfg->flushdone_cfg->tpid;
 		entry = ubcore_find_get_tp_id_state_entry(dev, tp_id);
 		if (entry == NULL) {
@@ -926,6 +949,11 @@ void ubcore_remove_tp_id_state_entry(struct ubcore_device *dev,
 	ht = &dev->ht[UBCORE_HT_TPID_STATE];
 
 	ubcore_hash_table_remove(ht, &tp_state_entry->hnode);
+	/* Drop the hash-table and initial allocation references. */
+	ubcore_tpid_state_kref_put(tp_state_entry);
+	ubcore_tpid_state_kref_put(tp_state_entry);
+	wait_for_completion(&tp_state_entry->comp);
+	mutex_destroy(&tp_state_entry->lock);
 	kfree(tp_state_entry);
 }
 
