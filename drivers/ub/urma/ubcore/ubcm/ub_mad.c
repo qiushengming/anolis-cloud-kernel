@@ -150,6 +150,9 @@ static int ubmad_check_eid_in_dev(struct ubcore_device *dev,
 {
 	int i;
 
+	if (IS_ERR_OR_NULL(eid_info) || IS_ERR_OR_NULL(dev->eid_table.eid_entries))
+		return -1;
+
 	spin_lock(&dev->eid_table.lock);
 	for (i = 0; i < dev->eid_table.eid_cnt; i++) {
 		if (memcmp(&dev->eid_table.eid_entries[i].eid, &eid_info->eid,
@@ -455,6 +458,32 @@ static void ubmad_release_tjetty(struct kref *kref)
 	struct ubmad_tjetty *tjetty =
 		container_of(kref, struct ubmad_tjetty, kref);
 	int ret;
+	struct ubmad_ini_rtbuffer *ini_rtbuffer;
+	struct ubmad_tgt_hash_node *tgt_hash_node;
+	struct hlist_node *next;
+	unsigned long flag;
+	uint32_t idx;
+
+
+	spin_lock_irqsave(&tjetty->ini_rt_spinlock, flag);
+	for (idx = 0; idx < UBMAD_INI_RTBUFFER_SIZE; idx++) {
+		hlist_for_each_entry_safe(ini_rtbuffer, next,
+					  &tjetty->ini_rt_hlist[idx], node) {
+			hlist_del(&ini_rtbuffer->node);
+			kfree(ini_rtbuffer);
+		}
+	}
+	spin_unlock_irqrestore(&tjetty->ini_rt_spinlock, flag);
+
+	spin_lock_irqsave(&tjetty->tgt_hash_lock, flag);
+	for (idx = 0; idx < UBMAD_TGT_HASH_SIZE; idx++) {
+		hlist_for_each_entry_safe(tgt_hash_node, next,
+					  &tjetty->tgt_hash_hlist[idx], node) {
+			hlist_del(&tgt_hash_node->node);
+			kfree(tgt_hash_node);
+		}
+	}
+	spin_unlock_irqrestore(&tjetty->tgt_hash_lock, flag);
 
 	ubmad_uninit_msn_mgr(&tjetty->msn_mgr);
 
@@ -583,6 +612,19 @@ struct ubmad_tjetty *ubmad_import_jetty(struct ubcore_device *device,
 		goto free;
 	}
 	new_tjetty->tjetty = new_target;
+
+	int idx;
+
+	for (idx = 0; idx < UBMAD_INI_RTBUFFER_SIZE; idx++)
+		INIT_HLIST_HEAD(&new_tjetty->ini_rt_hlist[idx]);
+	spin_lock_init(&new_tjetty->ini_rt_spinlock);
+	for (idx = 0; idx < UBMAD_TGT_HASH_SIZE; idx++)
+		INIT_HLIST_HEAD(&new_tjetty->tgt_hash_hlist[idx]);
+	for (idx = 0; idx < UBMAD_TGT_RTBUFFER_SIZE; idx++)
+		new_tjetty->tgt_rt_buffer[idx].msn = 0;
+	spin_lock_init(&new_tjetty->tgt_hash_lock);
+	atomic64_set(&new_tjetty->tgt_idx_gen, 1);
+	new_tjetty->rsrc = rsrc;
 
 	ubmad_init_msn_mgr(&new_tjetty->msn_mgr);
 
@@ -823,9 +865,6 @@ static int ubmad_init_jetty_rsrc(struct ubmad_jetty_resource *rsrc,
 		INIT_HLIST_HEAD(&rsrc->tjetty_hlist[idx]);
 	spin_lock_init(&rsrc->tjetty_hlist_lock);
 
-	/* reliable communication */
-	ubmad_init_seid_hlist(rsrc);
-
 	return 0;
 destroy_seg:
 	ubmad_destroy_seg(rsrc);
@@ -879,9 +918,6 @@ static void ubmad_uninit_jetty_rsrc(struct ubmad_jetty_resource *rsrc)
 	struct hlist_node *next;
 	unsigned long flag;
 	int i;
-
-	/* reliable communication */
-	ubmad_uninit_seid_hlist(rsrc);
 
 	/* tjetty */
 	spin_lock_irqsave(&rsrc->tjetty_hlist_lock, flag);
@@ -1053,8 +1089,12 @@ static void ubmad_release_device_priv(struct kref *kref)
 		container_of(kref, struct ubmad_device_priv, kref);
 
 	/* retransmission */
-	flush_workqueue(dev_priv->rt_wq);
+	drain_workqueue(dev_priv->rt_wq);
 	destroy_workqueue(dev_priv->rt_wq);
+
+	/* connection */
+	drain_workqueue(dev_priv->conn_wq);
+	destroy_workqueue(dev_priv->conn_wq);
 
 	/* rsrc */
 	ubmad_destroy_device_priv_resources(dev_priv);
@@ -1092,10 +1132,23 @@ static int ubmad_open_device(struct ubcore_device *device)
 	}
 
 	/* reliable communication */
-	dev_priv->rt_wq = create_workqueue("ubmad rt_wq");
+	dev_priv->rt_wq = alloc_workqueue("%s", 0, 0, "ubmad rt_wq");
 	if (IS_ERR_OR_NULL(dev_priv->rt_wq)) {
 		ubcore_log_err("create rt_wq failed. dev_name: %s\n",
 			     device->dev_name);
+		ubmad_destroy_device_priv_resources(dev_priv);
+		ubcore_unregister_event_handler(dev_priv->device,
+						&dev_priv->handler);
+		kfree(dev_priv);
+		return -1;
+	}
+
+	dev_priv->conn_wq = alloc_workqueue("%s", 0, 0, "ubmad conn_wq");
+	if (IS_ERR_OR_NULL(dev_priv->conn_wq)) {
+		ubcore_log_err("create conn_wq failed. dev_name: %s\n",
+			     device->dev_name);
+		drain_workqueue(dev_priv->rt_wq);
+		destroy_workqueue(dev_priv->rt_wq);
 		ubmad_destroy_device_priv_resources(dev_priv);
 		ubcore_unregister_event_handler(dev_priv->device,
 						&dev_priv->handler);
@@ -1271,8 +1324,10 @@ static void ubmad_release_agent_priv(struct kref *kref)
 	struct ubmad_agent_priv *agent_priv =
 		container_of(kref, struct ubmad_agent_priv, kref);
 
-	flush_workqueue(agent_priv->jfce_wq);
-	destroy_workqueue(agent_priv->jfce_wq);
+	drain_workqueue(agent_priv->jfce_wq_s);
+	destroy_workqueue(agent_priv->jfce_wq_s);
+	drain_workqueue(agent_priv->jfce_wq_r);
+	destroy_workqueue(agent_priv->jfce_wq_r);
 
 	kfree(agent_priv);
 }
@@ -1307,11 +1362,15 @@ struct ubmad_agent *ubmad_register_agent(struct ubcore_device *device,
 		return ERR_PTR(-ENOMEM);
 	kref_init(&agent_priv->kref);
 
-	agent_priv->jfce_wq = create_workqueue("ubmad jfce_wq");
-	if (IS_ERR_OR_NULL(agent_priv->jfce_wq)) {
-		ubcore_log_err("create agent_priv workqueue failed.\n");
-		kfree(agent_priv);
-		return NULL;
+	agent_priv->jfce_wq_s = alloc_workqueue("%s", 0, 0, "ubmad jfce_wq_s");
+	if (IS_ERR_OR_NULL(agent_priv->jfce_wq_s)) {
+		ubcore_log_err("alloc agent_priv workqueue_s failed.\n");
+		goto err_alloc_wq_s;
+	}
+	agent_priv->jfce_wq_r = alloc_workqueue("%s", 0, 0, "ubmad jfce_wq_r");
+	if (IS_ERR_OR_NULL(agent_priv->jfce_wq_r)) {
+		ubcore_log_err("alloc agent_priv workqueue_r failed.\n");
+		goto err_alloc_wq_r;
 	}
 
 	/* init agent */
@@ -1328,6 +1387,14 @@ struct ubmad_agent *ubmad_register_agent(struct ubcore_device *device,
 	spin_unlock_irqrestore(&g_ubmad_agent_list_lock, flag);
 
 	return agent;
+
+err_alloc_wq_r:
+	if (agent_priv->jfce_wq_s && !IS_ERR(agent_priv->jfce_wq_s))
+		destroy_workqueue(agent_priv->jfce_wq_s);
+
+err_alloc_wq_s:
+	kfree(agent_priv);
+	return ERR_PTR(-ENOMEM);
 }
 
 int ubmad_unregister_agent(struct ubmad_agent *agent)

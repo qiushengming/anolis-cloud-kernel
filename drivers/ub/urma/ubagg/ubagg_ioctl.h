@@ -101,7 +101,6 @@ struct ubagg_device_cap {
 	uint32_t max_fetch_and_xor_size;
 	union ubcore_atomic_feat atomic_feat;
 	uint16_t trans_mode; /* one or more from ubcore_transport_mode_t */
-	uint16_t sub_trans_mode_cap; /* one or more from ubcore_sub_trans_mode_cap */
 	uint16_t congestion_ctrl_alg; /* one or more mode from ubcore_congestion_ctrl_alg_t */
 	uint32_t ceq_cnt; /* completion vector count */
 	uint32_t max_tp_in_tpg;
@@ -151,6 +150,7 @@ struct ubagg_set_topo_info {
 struct ubagg_create_dev_arg {
 	struct {
 		union ubcore_eid agg_eid;
+		char dev_name[UBAGG_MAX_DEV_NAME_LEN];
 	} in;
 };
 
@@ -170,7 +170,7 @@ struct ubagg_get_dev_name_arg {
 };
 
 enum ubagg_userctl_opcode {
-	GET_SLAVE_DEVICE = 1,
+	GET_PHYSICAL_DEVICE = 1,
 	GET_TOPO_INFO = 2,
 	GET_JFR_ID = 3,
 	GET_JETTY_ID = 4,
@@ -178,10 +178,9 @@ enum ubagg_userctl_opcode {
 	GET_JETTY_INFO = 6,
 };
 
-struct ubagg_slave_device {
-	int slave_dev_num;
-	char slave_dev_name[UBAGG_MAX_DEV_NUM][UBAGG_MAX_DEV_NAME_LEN];
-	struct ubagg_physical_device physical_devices[IODIE_NUM];
+struct ubagg_physical_device_out {
+	int physical_dev_num;
+	struct ubagg_physical_device physical_devs[IODIE_NUM];
 };
 
 struct ubagg_topo_info_out {

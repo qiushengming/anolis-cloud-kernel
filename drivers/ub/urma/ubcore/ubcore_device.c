@@ -1297,8 +1297,8 @@ void ubcore_unregister_device(struct ubcore_device *dev)
 	up_write(&g_device_rwsem);
 	ubcore_clients_remove(dev);
 
-	ubcore_flush_workqueue((int)UBCORE_DISPATCH_EVENT_WQ);
-	ubcore_flush_workqueue((int)UBCORE_SIP_NOTIFY_WQ);
+	ubcore_drain_workqueue((int)UBCORE_DISPATCH_EVENT_WQ);
+	ubcore_drain_workqueue((int)UBCORE_SIP_NOTIFY_WQ);
 	ubcore_flush_dev_vtp_work(dev);
 	ubcore_session_flush(dev);
 
@@ -1753,7 +1753,7 @@ int ubcore_query_device_attr(struct ubcore_device *dev,
 	ret = dev->ops->query_device_attr(dev, attr);
 	if (ret != 0) {
 		ubcore_log_err("failed to query device attr, ret: %d.\n", ret);
-		return -UBCORE_DRV_ERRNO;
+		return ret;
 	}
 	return 0;
 }
@@ -2471,6 +2471,7 @@ struct ubcore_device *ubcore_get_device_by_eid(union ubcore_eid *eid,
 				   sizeof(union ubcore_eid)) == 0 &&
 			    dev->transport_type == type) {
 				target = dev;
+				ubcore_get_device(target);
 				break;
 			}
 		}

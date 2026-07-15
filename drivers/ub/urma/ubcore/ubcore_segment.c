@@ -71,13 +71,40 @@ int ubcore_free_token_id(struct ubcore_token_id *token_id)
 	ret = dev->ops->free_token_id(token_id);
 	if (ret != 0) {
 		ubcore_log_err("[DRV]Failed to free_token_id, ret is %d", ret);
-		return -UBCORE_DRV_ERRNO;
+		return ret;
 	}
 	ubcore_log_info("[FREE_TOKEN_ID] Free_token_id is %u.",
 			token_id->token_id);
 	return ret;
 }
 EXPORT_SYMBOL(ubcore_free_token_id);
+
+static bool ubcore_check_register_seg_access(struct ubcore_seg_cfg *cfg)
+{
+	if ((cfg->flag.bs.access & UBCORE_ACCESS_LOCAL_ONLY) &&
+		(cfg->flag.bs.access & (UBCORE_ACCESS_READ |
+		UBCORE_ACCESS_WRITE |
+		UBCORE_ACCESS_ATOMIC))) {
+		ubcore_log_err(
+			"Local only access is not allowed to config with other accesses.\n");
+		return false;
+	}
+	if ((cfg->flag.bs.access & UBCORE_ACCESS_WRITE) &&
+		!(cfg->flag.bs.access & UBCORE_ACCESS_READ)) {
+		ubcore_log_err(
+			"Write access should be config with read access.\n");
+		return false;
+	}
+	if ((cfg->flag.bs.access & UBCORE_ACCESS_ATOMIC) &&
+		!((cfg->flag.bs.access & UBCORE_ACCESS_READ) &&
+		(cfg->flag.bs.access & UBCORE_ACCESS_WRITE))) {
+		ubcore_log_err(
+			"Atomic access should be config with read and write access.\n");
+		return false;
+    }
+
+	return true;
+}
 
 static int ubcore_check_register_seg_para(struct ubcore_device *dev,
 					  struct ubcore_seg_cfg *cfg,
@@ -93,6 +120,9 @@ static int ubcore_check_register_seg_para(struct ubcore_device *dev,
 
 	if (ubcore_is_bonding_dev(dev))
 		return 0;
+
+	if (!ubcore_check_register_seg_access(cfg))
+		return -EINVAL;
 
 	if (cfg->flag.bs.pa == 1 && udata != NULL) {
 		ubcore_log_err("invalid parameter of pa.\n");
@@ -209,7 +239,7 @@ int ubcore_unregister_seg(struct ubcore_target_seg *tseg)
 	if (ret != 0) {
 		ubcore_log_err("[DRV]failed to unregister segment,dev name is %s, ret is %d.\n",
 			dev->dev_name, ret);
-		return -UBCORE_DRV_ERRNO;
+		return ret;
 	}
 
 	if (free_token_id == true && token_id != NULL)
@@ -272,7 +302,7 @@ int ubcore_unimport_seg(struct ubcore_target_seg *tseg)
 	if (ret != 0) {
 		ubcore_log_err("[DRV] Failed to unimport seg, dev_name is %s, ret is %d.",
 			       dev->dev_name, ret);
-		return -UBCORE_DRV_ERRNO;
+		return ret;
 	}
 	ubcore_log_info("[UNIMPORT SEG] Unimport seg, dev_name is %s.",
 			dev->dev_name);

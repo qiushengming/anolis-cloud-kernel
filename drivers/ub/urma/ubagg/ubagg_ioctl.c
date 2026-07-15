@@ -25,10 +25,7 @@
 
 #define UBAGG_DEVICE_MAX_EID_CNT 128
 #define UBAGG_MAX_BONDING_DEV_NUM 1024
-#define UBAGG_DEV_NAME_PREFIX "bonding_dev_"
-#define MAX_NUM_LEN 11
 #define BITMAP_OFFSET 1025
-#define BASE_DECIMAL 10
 
 static LIST_HEAD(g_ubagg_dev_list);
 static DEFINE_SPINLOCK(g_ubagg_dev_list_lock);
@@ -85,88 +82,6 @@ static struct ubagg_dev_name_eid_arr
 	g_name_eid_arr[UBAGG_MAX_BONDING_DEV_NUM] = { 0 };
 static DEFINE_MUTEX(g_name_eid_arr_lock);
 
-static bool g_device_id_has_use[UBAGG_MAX_BONDING_DEV_NUM] = { 0 };
-static DEFINE_MUTEX(g_device_id_lock);
-
-static int find_bond_device_id(void)
-{
-	int use_id, i;
-
-	mutex_lock(&g_device_id_lock);
-	for (i = 0; i < UBAGG_MAX_BONDING_DEV_NUM; i++) {
-		if (g_device_id_has_use[i] == false) {
-			use_id = i;
-			g_device_id_has_use[i] = true;
-			break;
-		}
-	}
-	mutex_unlock(&g_device_id_lock);
-	if (i == UBAGG_MAX_BONDING_DEV_NUM) {
-		ubagg_log_err("no free device id.\n");
-		return -1;
-	}
-	return use_id;
-}
-
-static void release_bond_device_id(int id)
-{
-	mutex_lock(&g_device_id_lock);
-	g_device_id_has_use[id] = false;
-	mutex_unlock(&g_device_id_lock);
-}
-
-static int release_bond_device_id_with_name(const char *str)
-{
-	const char *underscore_pos;
-	int id;
-	int ret;
-
-	if (!str) {
-		ubagg_log_err("name str is null\n");
-		return -EINVAL;
-	}
-
-	underscore_pos = strrchr(str, '_');
-	if (!underscore_pos) {
-		ubagg_log_err("invalid dev name: %s\n", str);
-		return -EINVAL;
-	}
-	if (underscore_pos[1] == '\0') {
-		ubagg_log_err("dev name is invalid\n");
-		return -EINVAL;
-	}
-	ret = kstrtoint(underscore_pos + 1, BASE_DECIMAL, &id);
-	if (ret) {
-		ubagg_log_err("str to int failed\n");
-		return ret;
-	}
-	release_bond_device_id(id);
-	return 0;
-}
-
-static char *generate_master_dev_name(void)
-{
-	char *name = NULL;
-	int cur_id;
-	int max_length;
-
-	cur_id = find_bond_device_id();
-	if (cur_id < 0) {
-		ubagg_log_err("no free device id.\n");
-		return NULL;
-	}
-
-	max_length = strlen(UBAGG_DEV_NAME_PREFIX) + MAX_NUM_LEN;
-	name = kmalloc_array(max_length, sizeof(char), GFP_KERNEL);
-	if (name == NULL) {
-		release_bond_device_id(cur_id);
-		ubagg_log_err("malloc master dev name failed.\n");
-		return NULL;
-	}
-	(void)snprintf(name, max_length, "%s%d", UBAGG_DEV_NAME_PREFIX, cur_id);
-	return name;
-}
-
 static bool ubagg_dev_exists(char *dev_name)
 {
 	struct ubagg_device *dev;
@@ -195,44 +110,141 @@ static struct ubagg_device *ubagg_find_dev_by_name(char *dev_name)
 	return NULL;
 }
 
-static bool get_slave_dev(char *dev_name, struct ubagg_slave_device *slave_dev)
+static bool is_agg_dev_valid(struct ubagg_topo_agg_dev *agg_dev)
 {
-	struct ubagg_device *ubagg_dev = ubagg_find_dev_by_name(dev_name);
-	int i;
+	struct ubagg_topo_agg_dev empty_dev = {0};
 
-	if (ubagg_dev == NULL) {
-		ubagg_log_err("aggregation device not exist.");
-		return false;
-	}
-
-	slave_dev->slave_dev_num = ubagg_dev->slave_dev_num;
-	for (i = 0; i < ubagg_dev->slave_dev_num; i++)
-		(void)memcpy(slave_dev->slave_dev_name[i],
-			     ubagg_dev->slave_dev_name[i],
-			     UBAGG_MAX_DEV_NAME_LEN);
-	return true;
+	return (memcmp(agg_dev, &empty_dev, sizeof(struct ubagg_topo_agg_dev)) == 0) ? false : true;
 }
 
-static int ubagg_get_slave_device(struct ubcore_device *dev,
-				  struct ubcore_user_ctl *user_ctl)
+static bool is_eid_valid(const char *eid)
 {
-	struct ubagg_slave_device slave_dev = { 0 };
+	int i;
+
+	for (i = 0; i < EID_LEN; i++) {
+		if (eid[i] != 0)
+			return true;
+	}
+	return false;
+}
+
+static bool is_eid_match(const char *eid1, const char *eid2)
+{
+	return memcmp(eid1, eid2, EID_LEN) == 0;
+}
+
+static int query_eid_idx(struct ubcore_device *dev, union ubcore_eid *eid,
+			 uint32_t *eid_idx)
+{
+	spin_lock(&dev->eid_table.lock);
+	for (int32_t i = 0; i < dev->eid_table.eid_cnt; i++) {
+		struct ubcore_eid_entry *eid_entity;
+
+		eid_entity = &dev->eid_table.eid_entries[i];
+		if (memcmp(eid, &eid_entity->eid, sizeof(*eid)) == 0) {
+			*eid_idx = eid_entity->eid_index;
+			spin_unlock(&dev->eid_table.lock);
+			return 0;
+		}
+	}
+	spin_unlock(&dev->eid_table.lock);
+	return -ENOENT;
+}
+
+static int get_physical_device(struct ubagg_device *ubagg_dev,
+			       struct ubagg_physical_device_out *out,
+			       union ubcore_eid *bonding_eid)
+{
+	struct ubagg_topo_map *topo_map;
+	struct ubagg_topo_agg_dev *topo_agg_dev;
 	int ret;
 
-	if (!get_slave_dev(dev->dev_name, &slave_dev)) {
-		ubagg_log_err("ubagg dev not exist:%s", dev->dev_name);
+	topo_map = get_global_ubagg_map();
+	if (topo_map == NULL) {
+		ubagg_log_err("global topo map is NULL\n");
+		return -EINVAL;
+	}
+
+	topo_agg_dev = find_cur_topo_agg_dev(topo_map, bonding_eid);
+	if (topo_agg_dev == NULL) {
+		ubagg_log_err("find cur node index failed\n");
+		return -EINVAL;
+	}
+
+	out->physical_dev_num = IODIE_NUM;
+	for (int i = 0; i < IODIE_NUM; i++) {
+		struct ubagg_topo_ue *topo_ue;
+		struct ubagg_physical_device *pdev;
+		union ubcore_eid *primary_eid;
+		struct ubcore_device *dev;
+
+		topo_ue = &topo_agg_dev->ues[i];
+
+		primary_eid = (union ubcore_eid *)&topo_ue->primary_eid;
+		dev = ubcore_get_device_by_eid(primary_eid, UBCORE_TRANSPORT_UB);
+		if (IS_ERR_OR_NULL(dev)) {
+			ubagg_log_err("Failed to query primary dev, eid: "EID_FMT"\n",
+				EID_RAW_ARGS(topo_ue->primary_eid));
+			return -ENOENT;
+		}
+
+		pdev = &out->physical_devs[i];
+		pdev->chip_id = topo_ue->chip_id;
+		(void)memcpy(pdev->dev_name, dev->dev_name, UBCORE_MAX_DEV_NAME);
+
+		ret = query_eid_idx(dev, primary_eid, &pdev->primary_eid_idx);
+		if (ret != 0) {
+			ubagg_log_err("Failed to query primary eid information, eid: "
+				EID_FMT"\n", EID_ARGS(*bonding_eid));
+			pdev->primary_eid_idx = UINT32_MAX;
+		}
+		for (int j = 0; j < MAX_PORT_NUM; j++) {
+			union ubcore_eid *port_eid;
+
+			port_eid = (union ubcore_eid *)&topo_ue->port_eid[j];
+			if (!is_eid_valid(port_eid->raw)) {
+				pdev->port_eid_idx[j] = UINT32_MAX;
+				continue;
+			}
+			ret = query_eid_idx(dev, port_eid, &pdev->port_eid_idx[j]);
+			if (ret != 0) {
+				ubagg_log_err("Failed to query port eid information, eid: "
+					EID_FMT"\n", EID_ARGS(*bonding_eid));
+				pdev->port_eid_idx[j] = UINT32_MAX;
+				continue;
+			}
+		}
+	}
+	return 0;
+}
+
+static int ubagg_get_physical_device(struct ubcore_device *dev,
+				  struct ubcore_user_ctl *user_ctl)
+{
+	struct ubagg_physical_device_out out = {0};
+	struct ubagg_device *ubagg_dev;
+	int ret;
+
+	ubagg_dev = ubagg_find_dev_by_name(dev->dev_name);
+	if (ubagg_dev == NULL) {
+		ubagg_log_err("Bonding device not exist.");
 		return -ENXIO;
 	}
 
-	if (user_ctl->out.len < sizeof(struct ubagg_slave_device)) {
+	if (get_physical_device(ubagg_dev, &out, &ubagg_dev->bonding_eid) != 0) {
+		ubagg_log_err("Failed to get physical device:%s", dev->dev_name);
+		return -ENXIO;
+	}
+
+	if (user_ctl->out.len < sizeof(struct ubagg_physical_device_out)) {
 		ubagg_log_err(
 			"ubagg user ctl has no enough space, buffer size:%u, needed size:%lu",
-			user_ctl->out.len, sizeof(struct ubagg_slave_device));
+			user_ctl->out.len, sizeof(struct ubagg_physical_device_out));
 		return -ENOSPC;
 	}
 
 	ret = copy_to_user((void __user *)user_ctl->out.addr,
-			   (void *)&slave_dev, sizeof(slave_dev));
+			   (void *)&out, sizeof(out));
 	if (ret != 0) {
 		ubagg_log_err("copy to user fail, ret:%d", ret);
 		return -EFAULT;
@@ -439,8 +451,8 @@ int ubagg_user_ctl(struct ubcore_device *dev, struct ubcore_user_ctl *user_ctl)
 	}
 
 	switch (user_ctl->in.opcode) {
-	case GET_SLAVE_DEVICE:
-		ret = ubagg_get_slave_device(dev, user_ctl);
+	case GET_PHYSICAL_DEVICE:
+		ret = ubagg_get_physical_device(dev, user_ctl);
 		break;
 	case GET_TOPO_INFO:
 		ret = ubagg_get_topo_info(dev, user_ctl);
@@ -965,29 +977,6 @@ static void free_ubagg_dev_bitmap(struct ubagg_device *ubagg_dev)
 	ubagg_dev->jfc_bitmap = NULL;
 }
 
-static bool is_agg_dev_valid(struct ubagg_topo_agg_dev *agg_dev)
-{
-	struct ubagg_topo_agg_dev empty_dev = {0};
-
-	return (memcmp(agg_dev, &empty_dev, sizeof(struct ubagg_topo_agg_dev)) == 0) ? false : true;
-}
-
-static bool is_eid_valid(const char *eid)
-{
-	int i;
-
-	for (i = 0; i < EID_LEN; i++) {
-		if (eid[i] != 0)
-			return true;
-	}
-	return false;
-}
-
-static bool is_eid_match(const char *eid1, const char *eid2)
-{
-	return memcmp(eid1, eid2, EID_LEN) == 0;
-}
-
 static int update_dev_info(struct ubagg_topo_node *new_topo_info,
 					struct ubagg_topo_node *old_topo_info)
 {
@@ -1134,6 +1123,17 @@ set_ubagg_device_attr_by_ubcore_cap(struct ubcore_device *dev,
 	dev->attr.dev_cap = *dev_cap;
 }
 
+static void ubagg_put_ubcore_device(struct ubcore_device *dev)
+{
+	if (IS_ERR_OR_NULL(dev)) {
+		ubagg_log_err("Invalid parameter\n");
+		return;
+	}
+
+	if (atomic_dec_and_test(&dev->use_cnt))
+		complete(&dev->comp);
+}
+
 static int init_ubagg_dev(struct ubagg_device *ubagg_dev,
 			  struct ubagg_add_dev_by_uvs *arg)
 {
@@ -1144,6 +1144,8 @@ static int init_ubagg_dev(struct ubagg_device *ubagg_dev,
 	// init ubagg device
 	(void)memcpy(ubagg_dev->master_dev_name, arg->master_dev_name,
 		     UBAGG_MAX_DEV_NAME_LEN);
+	(void)memcpy(&ubagg_dev->bonding_eid, &arg->agg_eid,
+		     sizeof(union ubcore_eid));
 	ubagg_log_info("master dev name: %s, eid : " EID_FMT "\n",
 		ubagg_dev->master_dev_name,
 		EID_ARGS(arg->agg_eid));
@@ -1168,6 +1170,7 @@ static int init_ubagg_dev(struct ubagg_device *ubagg_dev,
 
 		(void)memcpy(ubagg_dev->slave_dev_name[slave_dev_idx],
 			     dev->dev_name, UBAGG_MAX_DEV_NAME_LEN);
+		ubagg_put_ubcore_device(dev);
 		slave_dev_idx++;
 	}
 
@@ -1196,6 +1199,7 @@ static int init_ubagg_dev(struct ubagg_device *ubagg_dev,
 
 			(void)memcpy(ubagg_dev->slave_dev_name[slave_dev_idx],
 				     dev->dev_name, UBAGG_MAX_DEV_NAME_LEN);
+			ubagg_put_ubcore_device(dev);
 			slave_dev_idx++;
 		}
 	}
@@ -1265,7 +1269,6 @@ static int init_ubagg_ubcore_dev(struct ubagg_device *ubagg_dev,
 		ubagg_log_err("ubcore register device fail, name:%s\n",
 			      arg->master_dev_name);
 		free_ubagg_dev_bitmap(ubagg_dev);
-		ubagg_dev_ref_put(ubagg_dev);
 		return ret;
 	}
 
@@ -1536,7 +1539,7 @@ static int ubagg_create_dev(struct ubagg_create_dev_arg *arg)
 	struct ubagg_topo_agg_dev *agg_dev;
 	struct ubagg_topo_node *cur_node;
 	struct ubagg_topo_map *topo_map;
-	char *master_dev_name = NULL;
+	uint32_t dev_name_len = 0;
 	int ret;
 	int i;
 
@@ -1545,9 +1548,21 @@ static int ubagg_create_dev(struct ubagg_create_dev_arg *arg)
 		return -EINVAL;
 	}
 
+	dev_name_len = strnlen(arg->in.dev_name, UBAGG_MAX_DEV_NAME_LEN);
+	if (dev_name_len == 0 || dev_name_len >= UBAGG_MAX_DEV_NAME_LEN) {
+		ubagg_log_err("dev_name is invalid\n");
+		return -EINVAL;
+	}
+
 	if (has_add_dev_by_agg_eid(arg->in.agg_eid.raw)) {
 		ubagg_log_err("has add dev by aggr eid: " EID_FMT "\n",
 				   EID_RAW_ARGS(arg->in.agg_eid.raw));
+		return -EEXIST;
+	}
+
+	if (ubagg_dev_exists(arg->in.dev_name)) {
+		ubagg_log_err("ubagg dev already exist, name:%s\n",
+			      arg->in.dev_name);
 		return -EEXIST;
 	}
 
@@ -1575,26 +1590,18 @@ static int ubagg_create_dev(struct ubagg_create_dev_arg *arg)
 		return -ENODEV;
 	}
 
-	master_dev_name = generate_master_dev_name();
-	if (master_dev_name == NULL) {
-		ubagg_log_err("generate master dev name failed\n");
-		return -ENOMEM;
-	}
 	(void)snprintf(uvs_arg.master_dev_name, UBAGG_MAX_DEV_NAME_LEN, "%s",
-				master_dev_name);
+				arg->in.dev_name);
 
 	fill_add_dev_cfg(agg_dev, &uvs_arg);
 
 	ret = add_dev_by_uvs(&uvs_arg);
 	if (ret != 0) {
-		release_bond_device_id_with_name(master_dev_name);
-		kfree(master_dev_name);
 		ubagg_log_err("add ubagg dev by uvs failed, ret:%d\n", ret);
 		return ret;
 	}
 
-	find_add_master_dev(arg->in.agg_eid.raw, master_dev_name);
-	kfree(master_dev_name);
+	find_add_master_dev(arg->in.agg_eid.raw, arg->in.dev_name);
 	return 0;
 }
 
@@ -1756,7 +1763,6 @@ static int ubagg_delete_dev(const struct ubagg_delete_dev_arg *arg)
 	rmv_dev_from_list(dev);
 	ubcore_unregister_device(&dev->ub_dev);
 	uninit_ubagg_res(dev);
-	release_bond_device_id_with_name(dev->master_dev_name);
 
 	ubagg_dev_ref_put(dev);
 
@@ -1800,13 +1806,14 @@ static int ubagg_get_dev_name(struct ubagg_get_dev_name_arg *arg)
 
 	dev = ubcore_get_device_by_eid(&arg->in.eid, UBCORE_TRANSPORT_UB);
 	if (dev == NULL) {
-		ubagg_log_err("no ubcore dev for bonding eid: " EID_FMT "\n",
+		ubagg_log_info("no ubcore dev for bonding eid: " EID_FMT "\n",
 					  EID_RAW_ARGS(arg->in.eid.raw));
 		return -ENODEV;
 	}
 
 	(void)strscpy(arg->out.dev_name, dev->dev_name, UBAGG_MAX_DEV_NAME_LEN);
 
+	ubagg_put_ubcore_device(dev);
 	return 0;
 }
 
@@ -1829,7 +1836,7 @@ static int ubagg_cmd_get_dev_name(struct ubagg_cmd_hdr *hdr)
 
 	ret = ubagg_get_dev_name(&arg);
 	if (ret != 0) {
-		ubagg_log_err("ubagg_get_dev_name failed: %d\n", ret);
+		ubagg_log_info("ubagg_get_dev_name failed: %d\n", ret);
 		return ret;
 	}
 
