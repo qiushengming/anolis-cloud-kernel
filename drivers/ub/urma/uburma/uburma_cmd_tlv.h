@@ -702,6 +702,8 @@ enum uburma_cmd_import_jfr_ex_type {
 	IMPORT_JFR_EX_IN_TAG,
 	IMPORT_JFR_EX_IN_TX_PSN,
 	IMPORT_JFR_EX_IN_RX_PSN,
+	IMPORT_JFR_EX_IN_STAG,
+	IMPORT_JFR_EX_IN_DTAG,
 	IMPORT_JFR_EX_IN_UDATA, /* Consider udata as an ordinary member of in specs */
 	IMPORT_JFR_EX_IN_NUM, /* Only for calculating number of types */
 	/* Out type */
@@ -863,6 +865,8 @@ enum uburma_cmd_import_jetty_ex_type {
 	IMPORT_JETTY_EX_IN_TAG,
 	IMPORT_JETTY_EX_IN_TX_PSN,
 	IMPORT_JETTY_EX_IN_RX_PSN,
+	IMPORT_JETTY_EX_IN_STAG,
+	IMPORT_JETTY_EX_IN_DTAG,
 	IMPORT_JETTY_EX_IN_UDATA, /* Consider udata as an in/out attr */
 	IMPORT_JETTY_EX_IN_NUM, /* Only for calculating number of types */
 	/* Out type */
@@ -1344,6 +1348,16 @@ enum uburma_cmd_get_dmac_type {
 	/* Out type */
 	GET_DMAC_OUT_MAC = UBURMA_CMD_OUT_TYPE_INIT,
 	GET_DMAC_OUT_NUM, /* Only for calculating number of types */
+};
+
+enum uburma_cmd_get_jfce_cnt_type {
+	/* In type */
+	GET_JFCE_CNT_IN_THRESHOLD,
+	GET_JFCE_CNT_IN_NUM,
+	/* Out type */
+	GET_JFCE_CNT_OUT_JFCE_TOTAL_CNT = UBURMA_CMD_OUT_TYPE_INIT,
+	GET_JFCE_CNT_OUT_JFCE_THRESH_CNT,
+	GET_JFCE_CNT_OUT_NUM, /* Only for calculating number of types */
 };
 
 int uburma_tlv_parse(struct uburma_cmd_hdr *hdr, void *arg);

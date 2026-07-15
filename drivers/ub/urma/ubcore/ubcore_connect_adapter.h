@@ -60,6 +60,14 @@ struct ubcore_ex_tpid_info {
 	uint32_t peer_jetty_id;
 };
 
+struct ubcore_deactive_stp_work {
+	struct work_struct work;
+	struct ubcore_device *dev;
+	union ubcore_tp_handle tp_handle;
+	struct ubcore_udata udata;
+	bool uspace;
+};
+
 extern uint32_t ubcore_conn_timeout;
 
 struct ubcore_tjetty *ubcore_import_jfr_compat(struct ubcore_device *dev,
@@ -75,6 +83,8 @@ int ubcore_bind_jetty_compat(struct ubcore_jetty *jetty,
 			     struct ubcore_udata *udata);
 
 int ubcore_adapter_layer_disconnect(struct ubcore_vtpn *vtpn);
+
+int ubcore_adapter_layer_rm_stp_disconnect(struct ubcore_tjetty *tjetty);
 
 void ubcore_exchange_init(void);
 

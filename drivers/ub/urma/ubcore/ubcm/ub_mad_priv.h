@@ -21,15 +21,15 @@
 #define UBMAD_WK_JETTY_ID_1 2U
 
 // jetty
-#define UBMAD_JFS_DEPTH 512U
-#define UBMAD_JFR_DEPTH 1024U
+#define UBMAD_JFS_DEPTH 1024U
+#define UBMAD_JFR_DEPTH 2048U
 #define UBMAD_JFS_MAX_SGE_NUM 1
 #define UBMAD_JFR_MAX_SGE_NUM 1
 #define UBMAD_JETTY_ERR_TIMEOUT 17
 
 // seg
-#define UBMAD_SEND_SGE_NUM (UBMAD_JFS_DEPTH * 2)
-#define UBMAD_RECV_SGE_NUM (UBMAD_JFR_DEPTH * 2)
+#define UBMAD_SEND_SGE_NUM (UBMAD_JFS_DEPTH)
+#define UBMAD_RECV_SGE_NUM (UBMAD_JFR_DEPTH)
 
 // tjetty
 #define UBMAD_MAX_TJETTY_NUM 10240
@@ -44,15 +44,14 @@
 #define UBMAD_RETRANSMIT_MS 500
 #define UBMAD_RETRANSMIT_PERIOD msecs_to_jiffies(UBMAD_RETRANSMIT_MS)
 
-#define UBMAD_MAX_RETRY_CNT 4
 #define UBMAD_RX_BITMAP_SIZE 1024
 
 #define UBMAD_TX_THREDSHOLD (UBMAD_JFS_DEPTH - 8)
 
 #define UBMAD_INI_RTBUFFER_SIZE 1024
-#define UBMAD_TGT_RTBUFFER_SIZE 256
-#define UBMAD_TGT_RTBUFFER_MASK 255
-#define UBMAD_RTBUFFER_PKTSIZE 256
+#define UBMAD_TGT_RTBUFFER_SIZE 1024
+#define UBMAD_TGT_RTBUFFER_MASK 1023
+#define UBMAD_RTBUFFER_PKTSIZE 1024
 #define UBMAD_TGT_HASH_SIZE 1024
 
 /* common */
@@ -198,6 +197,7 @@ struct ubmad_jfce_work {
 
 	struct ubcore_jfc *jfc;
 	struct ubmad_agent_priv *agent_priv;
+	uint64_t start;
 };
 
 struct ubmad_jetty_work {
@@ -206,6 +206,7 @@ struct ubmad_jetty_work {
 	struct ubmad_jetty_resource *rsrc;
 	union ubcore_eid dst_primary_eid;
 	struct ubmad_send_buf *send_buf;
+	uint64_t start;
 };
 
 /** reliable communication **/
@@ -223,7 +224,7 @@ struct ubmad_rt_work {
 	struct delayed_work delay_work; // ubmad_device_priv.rt_wq
 
 	uint64_t msn;
-	uint32_t rt_cnt; /* Retry count, no larger than UBMAD_MAX_RETRY_CNT */
+	uint32_t rt_cnt; /* Retry count, no larger than ubcore_max_retry_cnt */
 	struct ubmad_msn_mgr *msn_mgr;
 	struct ubmad_jetty_resource *rsrc;
 	union ubcore_eid dst;
@@ -279,5 +280,9 @@ int ubmad_post_recv(struct ubmad_jetty_resource *rsrc);
 /* poll */
 void ubmad_jfce_handler_s(struct ubcore_jfc *jfc);
 void ubmad_jfce_handler_r(struct ubcore_jfc *jfc);
+
+struct ubmad_tjetty *
+ubmad_get_tjetty_lockless(struct ubmad_jetty_resource *rsrc, uint32_t hash,
+			  union ubcore_eid *dst_eid);
 
 #endif /* UB_MAD_PRIV_H */

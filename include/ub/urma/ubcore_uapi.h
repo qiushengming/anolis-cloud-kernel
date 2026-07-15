@@ -197,6 +197,7 @@ struct ubcore_target_seg *ubcore_import_seg(struct ubcore_device *dev,
  * @return: 0 on success, other value on error
  */
 int ubcore_unimport_seg(struct ubcore_target_seg *tseg);
+
 /**
  * create jfc with ubcore device.
  * @param[in] dev: the ubcore device handle;
@@ -288,6 +289,17 @@ int ubcore_active_jfc(struct ubcore_jfc *jfc, struct ubcore_udata *udata);
  */
 int ubcore_get_jfc_opt(struct ubcore_jfc *jfc, uint64_t opt,
 	void *buf, uint32_t len, struct ubcore_udata *udata);
+/**
+ * Get the opt of jfc by id.
+ * @param[in] dev: the ubcore device handle;
+ * @param[in] jfc_id: id of the allocated jfc;
+ * @param[in] opt: the option item of jfc to get;
+ * @param[out] buf: the buffer to store the value
+ * @param[in] len: the len of the opt value(byte);
+ * Return: 0 on success, other value on error
+ */
+int ubcore_get_jfc_opt_by_id(struct ubcore_device *dev, uint32_t jfc_id, uint64_t opt,
+	void *buf, uint32_t len);
 /**
  * Deactivate the activated jfc.
  * Note: active_jfc and deactive_jfc do not support concurrency
@@ -416,6 +428,17 @@ int ubcore_active_jfs(struct ubcore_jfs *jfs, struct ubcore_udata *udata);
 int ubcore_get_jfs_opt(struct ubcore_jfs *jfs, uint64_t opt,
 	void *buf, uint32_t len, struct ubcore_udata *udata);
 /**
+ * Get the opt of jfs by id.
+ * @param[in] dev: the ubcore device handle;
+ * @param[in] jfs_id: id of the allocated jfs;
+ * @param[in] opt: the option item of jfs to get;
+ * @param[out] buf: the buffer to store the value
+ * @param[in] len: the len of the opt value(byte);
+ * Return: 0 on success, other value on error
+ */
+int ubcore_get_jfs_opt_by_id(struct ubcore_device *dev, uint32_t jfs_id, uint64_t opt,
+	void *buf, uint32_t len);
+/**
  * Deactivate the activated jfs.
  * Note: active_jfs and deactive_jfs do not support concurrency
  * @param[in] jfs: handle of the allocated jfs;
@@ -518,6 +541,17 @@ int ubcore_active_jfr(struct ubcore_jfr *jfr, struct ubcore_udata *udata);
  */
 int ubcore_get_jfr_opt(struct ubcore_jfr *jfr, uint64_t opt,
 	void *buf, uint32_t len, struct ubcore_udata *udata);
+/**
+ * Get the opt of jfr by id.
+ * @param[in] dev: the ubcore device handle;
+ * @param[in] jfr_id: id of the allocated jfr;
+ * @param[in] opt: the option item of jfr to get;
+ * @param[out] buf: the buffer to store the value
+ * @param[in] len: the len of the opt value(byte);
+ * Return: 0 on success, other value on error
+ */
+int ubcore_get_jfr_opt_by_id(struct ubcore_device *dev, uint32_t jfr_id, uint64_t opt,
+	void *buf, uint32_t len);
 /**
  * Deactivated the activated jfr.
  * Note: active_jfr and deactive_jfr do not support concurrency
@@ -635,6 +669,17 @@ int ubcore_active_jetty(struct ubcore_jetty *jetty, struct ubcore_udata *udata);
  */
 int ubcore_get_jetty_opt(struct ubcore_jetty *jetty, uint64_t opt, void *buf,
 	uint32_t len, struct ubcore_udata *udata);
+/**
+ * Get the opt of jetty by id.
+ * @param[in] dev: the ubcore device handle;
+ * @param[in] jetty_id: id of the allocated jetty;
+ * @param[in] opt: the option item of jetty to get;
+ * @param[out] buf: the buffer to store the value
+ * @param[in] len: the len of the opt value(byte);
+ * Return: 0 on success, other value on error
+ */
+int ubcore_get_jetty_opt_by_id(struct ubcore_device *dev, uint32_t jetty_id, uint64_t opt,
+	void *buf, uint32_t len);
 /**
  * Deactivated the activated jetty.
  * @param[in] jetty: handle of the allocated jetty;
@@ -911,9 +956,10 @@ int ubcore_get_dmac(struct ubcore_device *dev,
  * @return: 0 on success, other value on error
  */
 int ubcore_exchange_tp_info(struct ubcore_device *dev,
-				struct ubcore_get_tp_cfg *cfg, uint64_t tp_handle,
-				uint32_t tx_psn, uint64_t *peer_tp_handle,
-				uint32_t *rx_psn, struct ubcore_udata *udata);
+				struct ubcore_get_tp_cfg *get_tp_cfg,
+				struct ubcore_active_tp_cfg *active_tp_cfg,
+				struct ubcore_tjetty_cfg *tjetty_cfg,
+				struct ubcore_udata *udata);
 
 /**
  * operation of user ioctl cmd.
@@ -997,6 +1043,11 @@ int ubcore_poll_jfc(struct ubcore_jfc *jfc, int cr_cnt, struct ubcore_cr *cr);
  */
 struct ubcore_device *ubcore_get_device_by_eid(union ubcore_eid *eid,
 					       enum ubcore_transport_type type);
+/**
+ * Put ubcore device reference returned by ubcore_get_device_by_eid
+ * @param[in] dev: the ubcore device pointer
+ */
+void ubcore_put_device(struct ubcore_device *dev);
 
 // for system not support cgroup
 #ifndef CONFIG_CGROUP_RDMA
@@ -1067,9 +1118,37 @@ void ubcore_cgroup_uncharge(struct ubcore_cg_object *cg_obj,
  */
 int ubcore_get_route_list(struct ubcore_route *route_v,
 	struct ubcore_route_list *route_list);
-
 int ubcore_get_topo_eid(uint32_t tp_type, union ubcore_eid *src_v_eid,
 	union ubcore_eid *dst_v_eid, union ubcore_eid *src_p_eid,
 	union ubcore_eid *dst_p_eid);
 
+/**
+ * send bonding user msg to peer through ubcore net layer
+ * @param[in] dev: the ubcore device handle
+ * @param[in] peer_eid: remote eid
+ * @param[in] session_id: message sequence number
+ * @param[in] payload: bonding user msg payload to send
+ * @param[in] payload_len: bonding user msg payload length
+ * @return: 0 on success, other value on error
+ */
+int ubcore_net_send_bonding_user_msg(struct ubcore_device *dev,
+				     union ubcore_eid peer_eid,
+				     uint32_t session_id,
+				     const void *payload,
+				     uint16_t payload_len);
+/**
+ * register net bonding user msg callback
+ * @param[in] handler: callback used to process received bonding user msg
+ * @return: 0 on success, other value on error
+ */
+int ubcore_net_register_bonding_user_msg_handler(
+	void (*handler)(struct ubcore_device *dev,
+			void *payload, uint16_t payload_len, void *conn));
+/**
+ * unregister net bonding user msg callback
+ * @param[in] handler: callback registered before
+ */
+void ubcore_net_unregister_bonding_user_msg_handler(
+	void (*handler)(struct ubcore_device *dev,
+			void *payload, uint16_t payload_len, void *conn));
 #endif

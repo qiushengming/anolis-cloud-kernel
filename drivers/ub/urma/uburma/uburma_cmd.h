@@ -120,6 +120,7 @@ enum uburma_cmd {
 	UBURMA_CMD_GET_JETTY_OPT,
 	UBURMA_CMD_ACTIVE_JETTY,
 	UBURMA_CMD_DEACTIVE_JETTY,
+	UBURMA_CMD_GET_JFCE_CNT,
 	UBURMA_CMD_MAX
 };
 
@@ -696,6 +697,8 @@ struct uburma_cmd_import_jfr_ex {
 		uint64_t tag;
 		uint32_t tx_psn;
 		uint32_t rx_psn;
+		uint64_t stag;
+		uint64_t dtag;
 	} in;
 	struct {
 		uint32_t tpn;
@@ -856,6 +859,9 @@ struct uburma_cmd_import_jetty_ex {
 		uint64_t tag;
 		uint32_t tx_psn;
 		uint32_t rx_psn;
+		/* correspond to upper layer business */
+		uint64_t stag;
+		uint64_t dtag;
 	} in;
 	struct {
 		uint32_t tpn;
@@ -1355,6 +1361,16 @@ struct uburma_cmd_get_dmac {
 	} in;
 	struct {
 		uint8_t mac[UBCORE_MAC_BYTES];
+	} out;
+};
+
+struct uburma_cmd_get_jfce_cnt {
+	struct {
+		uint32_t threshold;
+	} in;
+	struct {
+		uint64_t jfce_total_cnt;
+		uint64_t jfce_thresh_cnt;
 	} out;
 };
 

@@ -1318,6 +1318,8 @@ struct ubcore_jfc {
 	uint64_t urma_jfc; /* user space jfc pointer */
 	struct hlist_node hnode;
 	atomic_t use_cnt;
+	struct kref ref_cnt;
+	struct completion comp;
 	struct ubcore_jfc_opt jfc_opt;
 };
 
@@ -1494,6 +1496,13 @@ union ubcore_import_jetty_flag {
 
 enum ubcore_tp_type { UBCORE_RTP, UBCORE_CTP, UBCORE_UTP };
 
+struct ubcore_share_tp_cfg {
+	uint64_t stag;
+	uint64_t dtag;
+	int local_import;
+	uint32_t tx_psn;
+};
+
 struct ubcore_tjetty_cfg {
 	struct ubcore_jetty_id
 		id; /* jfr, jetty or jetty group id to be imported */
@@ -1505,6 +1514,7 @@ struct ubcore_tjetty_cfg {
 	struct ubcore_token
 		token_value; /* jfr, jetty or jetty group token_value to be imported */
 	enum ubcore_tp_type tp_type;
+	struct ubcore_share_tp_cfg stp_cfg;
 };
 
 struct ubcore_tjetty {

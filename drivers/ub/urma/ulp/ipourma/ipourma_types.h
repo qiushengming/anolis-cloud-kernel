@@ -72,7 +72,7 @@ enum {
 	IPOURMA_DEFAULT_MTU         = IPOURMA_MAX_MTU,
 	IPOURMA_ALEN                = 6,
 	IPOURMA_DEFAULT_TJETTY_CAP  = 256,
-	IPOURMA_MAX_EID_CNT         = 32,
+	IPOURMA_MAX_EID_CNT         = 128,
 	IPOURMA_TJETTY_CB_S         = 10,
 	IPOURMA_TJETTY_TIMEOUT_S    = 60,
 	IPOURMA_TJETTY_TIMEOUT_MAX  = 65535,
@@ -341,6 +341,9 @@ struct ipourma_dev_priv {
 	atomic_t rx_jfr_ref;
 	bool *tx_ring_is_full;
 	atomic_t tx_ring_blocked;
+	atomic_t need_set_ip;
+	struct list_head set_ip_list;
+	spinlock_t set_ip_lock;
 	/* tjetty lru */
 	struct ipourma_tjetty_lru tjetty_lru;
 	/* runtime stats statistics */
