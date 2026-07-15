@@ -30,6 +30,7 @@
 #include "ubcore_vtp.h"
 #include "ubcore_connect_adapter.h"
 #include "ubcore_topo_info.h"
+#include "ubcore_priv.h"
 #include "net/ubcore_session.h"
 #include "net/ubcore_cm.h"
 #include "ubmgr/ubmgr_topo.h"
@@ -556,10 +557,46 @@ ubcore_get_all_mue_device(enum ubcore_transport_type type, uint32_t *dev_cnt)
 	return dev_list;
 }
 
-static void ubcore_free_driver_obj(void *obj)
+static void ubcore_free_driver_obj(void *obj,
+	enum ubcore_hash_table_type type)
 {
 	// obj alloced by driver, should not free by ubcore
-	ubcore_log_err("obj was not free correctly!");
+	ubcore_log_err("obj was not free correctly, type: %d.", type);
+}
+
+static void ubcore_free_jfs_obj(void *obj)
+{
+	ubcore_free_driver_obj(obj, UBCORE_HT_JFS);
+}
+
+static void ubcore_free_jfr_obj(void *obj)
+{
+	ubcore_free_driver_obj(obj, UBCORE_HT_JFR);
+}
+
+static void ubcore_free_jfc_obj(void *obj)
+{
+	ubcore_free_driver_obj(obj, UBCORE_HT_JFC);
+}
+
+static void ubcore_free_jetty_obj(void *obj)
+{
+	ubcore_free_driver_obj(obj, UBCORE_HT_JETTY);
+}
+
+static void ubcore_free_cp_vtpn_obj(void *obj)
+{
+	ubcore_free_driver_obj(obj, UBCORE_HT_CP_VTPN);
+}
+
+static void ubcore_free_ex_tp_obj(void *obj)
+{
+	ubcore_free_driver_obj(obj, UBCORE_HT_EX_TP);
+}
+
+static void ubcore_free_rc_tp_id_obj(void *obj)
+{
+	ubcore_free_driver_obj(obj, UBCORE_HT_RC_TP_ID);
 }
 
 static struct ubcore_ht_param g_ht_params[] = {
@@ -567,37 +604,42 @@ static struct ubcore_ht_param g_ht_params[] = {
 			    offsetof(struct ubcore_jfs, hnode),
 			    offsetof(struct ubcore_jfs, jfs_id) +
 				    offsetof(struct ubcore_jetty_id, id),
-			    sizeof(uint32_t), NULL, ubcore_free_driver_obj,
+			    sizeof(uint32_t), NULL, ubcore_free_jfs_obj,
 			    ubcore_jfs_get },
 
 	[UBCORE_HT_JFR] = { UBCORE_HASH_TABLE_SIZE,
 			    offsetof(struct ubcore_jfr, hnode),
 			    offsetof(struct ubcore_jfr, jfr_id) +
 				    offsetof(struct ubcore_jetty_id, id),
-			    sizeof(uint32_t), NULL, ubcore_free_driver_obj,
+			    sizeof(uint32_t), NULL, ubcore_free_jfr_obj,
 			    ubcore_jfr_get },
 	[UBCORE_HT_JFC] = { UBCORE_HASH_TABLE_SIZE,
 			    offsetof(struct ubcore_jfc, hnode),
 			    offsetof(struct ubcore_jfc, id), sizeof(uint32_t),
-			    NULL, ubcore_free_driver_obj, NULL },
+			    NULL, ubcore_free_jfc_obj, NULL },
 
 	[UBCORE_HT_JETTY] = { UBCORE_HASH_TABLE_SIZE,
 			      offsetof(struct ubcore_jetty, hnode),
 			      offsetof(struct ubcore_jetty, jetty_id) +
 				      offsetof(struct ubcore_jetty_id, id),
-			      sizeof(uint32_t), NULL, ubcore_free_driver_obj,
+			      sizeof(uint32_t), NULL, ubcore_free_jetty_obj,
 			      ubcore_jetty_get },
 	/* key: currently tp_handle */
 	[UBCORE_HT_CP_VTPN] = { UBCORE_HASH_TABLE_SIZE,
 				offsetof(struct ubcore_vtpn, hnode),
 				offsetof(struct ubcore_vtpn, tp_handle),
-				sizeof(uint64_t), NULL, ubcore_free_driver_obj,
+				sizeof(uint64_t), NULL, ubcore_free_cp_vtpn_obj,
 				ubcore_vtpn_get },
 	[UBCORE_HT_EX_TP] = { UBCORE_HASH_TABLE_SIZE,
 			      offsetof(struct ubcore_ex_tp_info, hnode),
 			      offsetof(struct ubcore_ex_tp_info, tp_handle),
-			      sizeof(uint64_t), NULL, ubcore_free_driver_obj,
+			      sizeof(uint64_t), NULL, ubcore_free_ex_tp_obj,
 			      NULL },
+	[UBCORE_HT_RC_TP_ID] = { UBCORE_HASH_TABLE_SIZE,
+			      offsetof(struct ubcore_tpid_ctx, hnode),
+			      offsetof(struct ubcore_tpid_ctx, key),
+			      sizeof(struct ubcore_tpid_key), NULL,
+			      ubcore_free_rc_tp_id_obj, ubcore_tpid_get },
 };
 
 static inline void ubcore_set_vtpn_hash_table_size(uint32_t vtpn_size)
@@ -1210,16 +1252,17 @@ int ubcore_register_device(struct ubcore_device *dev)
 
 	down_write(&g_device_rwsem);
 	ubcore_clients_add(dev);
-	ret = ubcore_copy_logic_devices(dev);
-	if (ret) {
-		ubcore_clients_remove(dev);
-		up_write(&g_device_rwsem);
+	if (g_shared_ns) {
+		ret = ubcore_copy_logic_devices(dev);
+		if (ret) {
+			ubcore_clients_remove(dev);
+			up_write(&g_device_rwsem);
 
-		ubcore_log_err("copy logic device failed, device:%s.\n",
-			       dev->dev_name);
-		goto err;
+			ubcore_log_err("copy logic device failed, device:%s.\n",
+					dev->dev_name);
+			goto err;
+		}
 	}
-
 	list_add_tail(&dev->list_node, &g_device_list);
 	up_write(&g_device_rwsem);
 
@@ -1595,7 +1638,7 @@ ubcore_alloc_ucontext(struct ubcore_device *dev, uint32_t eid_index,
 		ubcore_log_err("failed to alloc ucontext.\n");
 		ubcore_cgroup_uncharge(&cg_obj, dev,
 				       UBCORE_RESOURCE_HCA_HANDLE);
-		return UBCORE_CHECK_RETURN_ERR_PTR(ucontext, ENOEXEC);
+		return UBCORE_CHECK_RETURN_ERR_PTR(ucontext, UBCORE_DRV_ERRNO);
 	}
 
 	ucontext->eid_index = eid_index;
@@ -1710,7 +1753,7 @@ int ubcore_query_device_attr(struct ubcore_device *dev,
 	ret = dev->ops->query_device_attr(dev, attr);
 	if (ret != 0) {
 		ubcore_log_err("failed to query device attr, ret: %d.\n", ret);
-		return -EPERM;
+		return -UBCORE_DRV_ERRNO;
 	}
 	return 0;
 }
@@ -1793,7 +1836,8 @@ int ubcore_user_control(struct ubcore_device *dev,
 
 	ret = dev->ops->user_ctl(dev, k_user_ctl);
 	if (ret != 0) {
-		ubcore_log_err("failed to exec kdrv_user_ctl.\n");
+		/* Do not change ret into -UBCORE_DRV_ERRNO, different from other ops */
+		ubcore_log_err("[DRV_ERROR]Failed to exec user_ctl, ret: %d.\n", ret);
 		return ret;
 	}
 
@@ -1956,6 +2000,7 @@ static int ubcore_modify_dev_ns(struct ubcore_device *dev, struct net *net,
 		goto out;
 	}
 
+	ubcore_remove_logic_devices(dev);
 	ubcore_modify_eid_ns(dev, net);
 
 out:
