@@ -16,6 +16,7 @@
 #include <net/genetlink.h>
 #include <ub/urma/ubcore_uapi.h>
 
+#include "ubagg_device.h"
 #include "ubagg_dfx.h"
 #include "ubagg_failback.h"
 #include "ubagg_log.h"
@@ -58,7 +59,7 @@ enum ubagg_genl_mcgrp {
 };
 
 static const struct genl_multicast_group ubagg_genl_mcgrps[] = {
-	[UBAGG_NL_MCGRP_USER_PAYLOAD] = { .name = "user_payload" },
+	[UBAGG_NL_MCGRP_USER_PAYLOAD] = { .name = "bonding" },
 };
 
 static const struct genl_ops ubagg_genl_ops[] = {
@@ -79,18 +80,6 @@ static const struct genl_ops ubagg_genl_ops[] = {
 		.policy = ubagg_genl_policy,
 		.maxattr = ARRAY_SIZE(ubagg_genl_policy) - 1,
 		.doit = ubagg_nl_get_v2p_res_ops,
-	},
-	{
-		.cmd = UBAGG_NL_CMD_FAILBACK_START,
-		.policy = ubagg_genl_policy,
-		.maxattr = ARRAY_SIZE(ubagg_genl_policy) - 1,
-		.doit = ubagg_fb_nl_start,
-	},
-	{
-		.cmd = UBAGG_NL_CMD_FAILBACK_RESULT,
-		.policy = ubagg_genl_policy,
-		.maxattr = ARRAY_SIZE(ubagg_genl_policy) - 1,
-		.doit = ubagg_fb_nl_result,
 	},
 };
 
@@ -190,7 +179,7 @@ static int ubagg_nl_get_physical_device_ops(struct sk_buff *skb,
 	size_t arg_size = 0;
 	struct ubagg_cmd_physical_device *arg = NULL;
 	int ret = -EINVAL;
-	struct ubcore_device *dev = NULL;
+	struct ubagg_device *ubagg_dev = NULL;
 	struct ubagg_physical_device_out out = { 0 };
 	struct sk_buff *msg;
 	void *hdr;
@@ -212,23 +201,24 @@ static int ubagg_nl_get_physical_device_ops(struct sk_buff *skb,
 		     nla_data(info->attrs[UBAGG_ATTR_EID]),
 		     sizeof(union ubcore_eid));
 
-	dev = ubcore_get_device_by_eid(&arg->in.bonding_eid,
-				       UBCORE_TRANSPORT_UB);
-	if (IS_ERR_OR_NULL(dev)) {
-		ubagg_log_err("Failed to query primary dev\n");
+	ubagg_dev = ubagg_get_device_by_eid(&arg->in.bonding_eid);
+	if (ubagg_dev == NULL) {
+		ubagg_log_err("Failed to query bonding dev\n");
 		kfree(arg);
 		return -ENOENT;
 	}
-	(void)memcpy(arg->out.dev_name, dev->dev_name, UBAGG_MAX_DEV_NAME_LEN);
+	(void)strscpy(arg->out.dev_name, ubagg_dev->master_dev_name,
+		      UBAGG_MAX_DEV_NAME_LEN);
 
-	ret = query_eid_idx(dev, &arg->in.bonding_eid,
+	ret = query_eid_idx(&ubagg_dev->ub_dev, &arg->in.bonding_eid,
 			    &arg->out.bonding_eid_idx);
-	ubagg_put_ubcore_device(dev);
 	if (ret != 0) {
 		ubagg_log_err("Failed to query eid information\n");
+		ubagg_put_device(ubagg_dev);
 		kfree(arg);
 		return ret;
 	}
+	ubagg_put_device(ubagg_dev);
 
 	ret = get_physical_device(NULL, &out, &arg->in.bonding_eid);
 	if (ret != 0) {
@@ -291,16 +281,16 @@ static int ubagg_nl_get_v2p_res_ops(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	arg->in.dev_name[UBCORE_MAX_DEV_NAME - 1] = '\0';
-	ubagg_dev = ubagg_find_dev_by_name(arg->in.dev_name);
+	ubagg_dev = ubagg_get_device_by_name(arg->in.dev_name);
 	if (ubagg_dev == NULL) {
-		ubagg_log_err("Failed to find ubagg dev %s\n",
+		ubagg_log_err("Failed to get ubagg dev %s\n",
 			      arg->in.dev_name);
 		ret = -ENOENT;
 		goto free_arg;
 	}
 
 	ret = ubagg_query_v2p_res(ubagg_dev, arg);
-	ubagg_dev_ref_put(ubagg_dev);
+	ubagg_put_device(ubagg_dev);
 	if (ret != 0) {
 		ubagg_log_err("Failed to query ubagg v2p res, ret:%d\n", ret);
 		goto free_arg;

@@ -493,6 +493,7 @@ void ubcore_put_device(struct ubcore_device *dev)
 	if (atomic_dec_and_test(&dev->use_cnt))
 		complete(&dev->comp);
 }
+EXPORT_SYMBOL(ubcore_put_device);
 
 struct ubcore_device *
 ubcore_find_mue_device_legacy(enum ubcore_transport_type type)
@@ -1511,10 +1512,9 @@ static bool ubcore_preprocess_event(struct ubcore_event *event)
 			event->element.tpid_info.tpid);
 
 		cfg.flushdone_cfg->tpid = event->element.tpid_info.tpid;
-		if (ubcore_modify_tpid(event->ub_dev, UBCORE_TPID_STATE_RESET, &cfg) != 0)
-			return false;
-		else
-			return true;
+		(void)ubcore_modify_tpid(event->ub_dev, UBCORE_TPID_STATE_RESET, &cfg);
+
+		return true;
 	}
 
 	return false;
