@@ -172,9 +172,6 @@ static inline struct cdma_jfc *to_cdma_jfc(struct cdma_base_jfc *base_jfc)
 	return container_of(base_jfc, struct cdma_jfc, base);
 }
 
-int cdma_post_destroy_jfc_mbox(struct cdma_dev *cdev, u32 jfcn,
-			       enum cdma_jfc_state state);
-
 struct cdma_base_jfc *cdma_create_jfc(struct cdma_dev *cdev,
 				      struct cdma_jfc_cfg *cfg,
 				      struct cdma_udata *udata);
@@ -188,4 +185,4 @@ int cdma_jfc_completion(struct notifier_block *nb, unsigned long jfcn,
 int cdma_poll_jfc(struct cdma_base_jfc *base_jfc, int cr_cnt,
 		  struct dma_cr *cr);
 
-#endif /* CDMA_JFC_H */
+#endif /* __CDMA_JFC_H__ */

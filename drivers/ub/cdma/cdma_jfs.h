@@ -244,7 +244,7 @@ struct cdma_jfs_ctx {
 	u32 rsv7 : 12;
 	/* DW12 */
 	u32 rmt_tokenid : 20;
-	u64 rsv9 : 12;
+	u32 rsv9 : 12;
 	/* DW13-DW15 */
 	u32 rsv12[3];
 	/* DW16 */
@@ -326,4 +326,4 @@ int cdma_delete_jfs(struct cdma_dev *cdev, u32 jfs_id);
 int cdma_post_jfs_wr(struct cdma_jfs *jfs, struct cdma_jfs_wr *wr,
 		     struct cdma_jfs_wr **bad_wr);
 
-#endif
+#endif /* __CDMA_JFS_H__ */

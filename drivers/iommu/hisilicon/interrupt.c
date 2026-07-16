@@ -8,9 +8,11 @@
 #include <linux/interrupt.h>
 #include <linux/msi.h>
 
+#include "trace/trace.h"
 #include "ummu.h"
 #include "queue.h"
 #include "regs.h"
+#include "logic_ummu/logic_ummu.h"
 #include "interrupt.h"
 
 #define EVT_LOG_LIMIT_TIMEOUT 5000
@@ -214,7 +216,163 @@ static irqreturn_t ummu_gerror_handler(int irq, void *dev)
 	return IRQ_HANDLED;
 }
 
-static void ummu_print_event(struct ummu_device *ummu, u8 code, u64 *evt)
+static void ummu_make_iommu_fault(struct ummu_device *ummu,
+				  struct ummu_device_event *evt,
+				  struct iommu_fault *flt)
+{
+	flt->type = IOMMU_FAULT_PAGE_REQ;
+	flt->prm.flags = IOMMU_FAULT_PAGE_REQUEST_LAST_PAGE |
+			 IOMMU_FAULT_PAGE_REQUEST_PRIV_DATA |
+			 IOMMU_FAULT_PAGE_REQUEST_PASID_VALID;
+	flt->prm.grpid = evt->stag;
+	flt->prm.perm = (evt->instruction ? IOMMU_FAULT_PERM_EXEC : 0) |
+			(evt->privileged ? IOMMU_FAULT_PERM_PRIV : 0) |
+			(evt->read ? IOMMU_FAULT_PERM_READ :
+				     IOMMU_FAULT_PERM_WRITE);
+	flt->prm.addr = evt->iova;
+	flt->prm.private_data[0] = evt->tect_tag;
+	flt->prm.private_data[1] = (u64)(uintptr_t)ummu;
+	flt->prm.pasid = evt->tid;
+}
+
+void ummu_page_response(struct device *dev, struct iopf_fault *evt,
+			struct iommu_page_response *resp)
+{
+	struct iommu_fault_page_request *prm = &evt->fault.prm;
+	struct ummu_device *ummu = (struct ummu_device *)(uintptr_t)prm->private_data[1];
+	struct ummu_mcmdq_ent cmd = { 0 };
+
+	if (!(prm->flags & IOMMU_FAULT_PAGE_REQUEST_PRIV_DATA)) {
+		dev_err(dev, "tect_tag and ummu instance not set.\n");
+		return;
+	}
+
+	cmd.opcode = CMD_STALL_RESUME;
+	cmd.stall_resume.tag = resp->grpid;
+	cmd.stall_resume.tect_tag = prm->private_data[0];
+
+	switch (resp->code) {
+	case IOMMU_PAGE_RESP_INVALID:
+	case IOMMU_PAGE_RESP_FAILURE:
+		cmd.stall_resume.abort = true;
+		dev_err_ratelimited(ummu->dev,
+			"page fault failed. pasid=0x%x grpid=0x%x perm=0x%x tect_tag=0x%llx\n",
+			prm->pasid, prm->grpid, prm->perm, prm->private_data[0]);
+		break;
+	case IOMMU_PAGE_RESP_SUCCESS:
+		cmd.stall_resume.retry = true;
+		break;
+	default:
+		return;
+	}
+	ummu_mcmdq_issue_cmd(ummu, &cmd);
+}
+
+static inline void ummu_abort_page_fault(struct ummu_device *ummu,
+					 u32 gripid, u32 tect_tag)
+{
+	struct ummu_mcmdq_ent cmd = { 0 };
+
+	cmd.opcode = CMD_STALL_RESUME;
+	cmd.stall_resume.tag = gripid;
+	cmd.stall_resume.tect_tag = tect_tag;
+	cmd.stall_resume.abort = true;
+
+	ummu_mcmdq_issue_cmd(ummu, &cmd);
+}
+
+static bool ummu_report_iommu_fault(struct device *evt_src, u32 tid)
+{
+	struct iommu_domain *domain = ummu_core_get_domain_by_tid(evt_src, tid);
+
+	if (!domain) {
+		pr_err("get domain failed.\n");
+		return false;
+	}
+
+	domain = iommu_to_agent_domain(domain);
+	if (!domain->mm || iommu_is_ksva_domain(domain)) {
+		pr_err("An iopf event reported by ksva/dma device is not allowed.\n");
+		return false;
+	}
+	return true;
+}
+
+/* IRQ and event handlers */
+static int ummu_handle_iopf(struct ummu_device *ummu,
+			    struct ummu_device_event *evt)
+{
+	struct iopf_fault pf_fault = { 0 };
+	struct iommu_fault *iommu_flt = &pf_fault.fault;
+	struct device *dev = evt->dev;
+	int ret;
+
+	ummu_make_iommu_fault(ummu, evt, iommu_flt);
+	/* S2 never fault */
+	if (evt->s2) {
+		ret = -EFAULT;
+		goto abort_req;
+	}
+	/* tid or tid related device has been released */
+	if (!dev) {
+		ret = -EINVAL;
+		goto abort_req;
+	}
+
+	/* DMA Fault or KSVA Fault should be filtered */
+	if (!ummu_report_iommu_fault(dev, iommu_flt->prm.pasid)) {
+		ret = -EOPNOTSUPP;
+		goto abort_req;
+	}
+	ret = iommu_report_device_fault(dev, &pf_fault);
+	if (ret)
+		goto abort_req;
+
+	return 0;
+
+abort_req:
+	ummu_abort_page_fault(ummu, iommu_flt->prm.grpid,
+			      iommu_flt->prm.private_data[0]);
+	pr_err("handle iopf failed, ret = %d\n", ret);
+
+	return ret;
+}
+
+static void ummu_device_decode_event(struct ummu_device *ummu, u64 *raw,
+				     struct ummu_device_event *event)
+{
+	event->code = FIELD_GET(EVTQ_ENT0_CODE, raw[0]);
+	event->read = FIELD_GET(EVTQ_ENT0_RNW, raw[0]);
+	event->instruction = FIELD_GET(EVTQ_ENT0_IND, raw[0]);
+	event->privileged = FIELD_GET(EVTQ_ENT0_PNU, raw[0]);
+	event->cls = FIELD_GET(EVTQ_ENT0_CLS, raw[0]);
+	event->ns_ipa = FIELD_GET(EVTQ_ENT0_NSIPA, raw[0]);
+	event->s2 = FIELD_GET(EVTQ_ENT0_S2, raw[0]);
+	event->stall = FIELD_GET(EVTQ_ENT0_STALL, raw[0]);
+	event->tid = FIELD_GET(EVTQ_ENT0_TID, raw[0]);
+	event->stag = FIELD_GET(EVTQ_ENT1_STAG, raw[1]);
+	event->ipa = raw[2] & EVTQ_ENT2_IPA;
+	event->iova = FIELD_GET(EVTQ_ENT3_IADDR, raw[3]);
+	event->tect_tag = FIELD_GET(EVTQ_ENT4_TECTE_TAG, raw[4]);
+
+	event->dev = ummu_core_get_device(&ummu->core_dev, event->tid);
+}
+
+static int ummu_device_handle_evt(struct ummu_device *ummu,
+				  struct ummu_device_event *event)
+{
+	int ret;
+
+	if (event->stall)
+		ret = ummu_handle_iopf(ummu, event);
+	else
+		ret = -EOPNOTSUPP;
+
+	return ret;
+}
+
+static void ummu_device_dump_event(struct ummu_device *ummu, u64 *raw,
+				   struct ummu_device_event *evt)
 {
 	static DEFINE_RATELIMIT_STATE(rs, DEFAULT_RATELIMIT_INTERVAL,
 				      DEFAULT_RATELIMIT_BURST);
@@ -225,14 +383,15 @@ static void ummu_print_event(struct ummu_device *ummu, u8 code, u64 *evt)
 	if (!__ratelimit(&rs))
 		return;
 
-	if (last_evt_code == code && time_is_after_jiffies64(timeout))
+	if (last_evt_code == evt->code && time_is_after_jiffies64(timeout))
 		return;
 
-	last_evt_code = code;
+	last_evt_code = evt->code;
 	timeout = get_jiffies_64() + msecs_to_jiffies(EVT_LOG_LIMIT_TIMEOUT);
-	dev_info(ummu->dev, "event 0x%02x received:\n", code);
+
+	dev_info(ummu->dev, "event 0x%02x received:\n", evt->code);
 	for (i = 0; i < EVTQ_ENT_DWORDS; ++i)
-		dev_info(ummu->dev, "\t0x%016llx\n", (u64)evt[i]);
+		dev_info(ummu->dev, "\t0x%016llx\n", raw[i]);
 }
 
 /* implementation is based on the ARM SMMU arm_smmu_evtq_thread */
@@ -241,34 +400,25 @@ static irqreturn_t ummu_evtq_thread(int irq, void *dev)
 	struct ummu_device *ummu = (struct ummu_device *)dev;
 	struct ummu_queue *q = &ummu->evtq.q;
 	struct ummu_ll_queue *llq = &q->llq;
+	struct ummu_device_event event = {0};
 	u64 evt[EVTQ_ENT_DWORDS];
-	u32 tid;
-	u8 code;
 
 	do {
 		while (!ummu_queue_remove_raw(q, evt)) {
-			code = FIELD_GET(EVTQ_ENT0_CODE, evt[0]);
-			tid = FIELD_GET(EVTQ_ENT0_TID, evt[0]);
-
-			ummu_print_event(ummu, code, evt);
-
+			ummu_device_decode_event(ummu, evt, &event);
+			trace_ummu_event(dev_name(ummu->dev), event.code, evt, EVTQ_ENT_DWORDS);
+			if (ummu_device_handle_evt(ummu, &event))
+				ummu_device_dump_event(ummu, evt, &event);
+			ummu_core_put_device(event.dev);
 			cond_resched();
 		}
 
 		if (ummu_queue_sync_prod_in(q) == -EOVERFLOW)
-			dev_err(ummu->dev,
-				"EVTQ overflow detected -- events lost\n");
+			dev_err(ummu->dev, "EVTQ overflow -- events lost\n");
 	} while (!ummu_queue_empty(llq));
 
-	if (likely(Q_OVF(llq->prod) == Q_OVF(llq->cons)))
-		goto handled;
-
 	/* Sync overflow flag */
-	llq->cons = Q_OVF(llq->prod) | Q_WRP(llq, llq->cons) |
-		    Q_IDX(llq, llq->cons);
-	__iomb();
-	writel_relaxed(q->llq.cons, q->cons_reg);
-handled:
+	ummu_queue_sync_cons_ovf(q);
 	return IRQ_HANDLED;
 }
 
@@ -286,9 +436,12 @@ static void ummu_write_msi_msg(struct msi_desc *desc, struct msi_msg *msg)
 	phys_addr_t msi_addr;
 	phys_addr_t *cfg;
 
-	if (desc->msi_index > GERROR_MSI_INDEX)
-		return;
+	if (desc->msi_index > GERROR_MSI_INDEX) {
+		if (ummu->impl_ops && ummu->impl_ops->write_msi_msg)
+			ummu->impl_ops->write_msi_msg(desc, msg);
 
+		return;
+	}
 	cfg = ummu_msi_cfg[desc->msi_index];
 	/* 32 bit addresses are converted to 64 bit addresses. */
 	msi_addr = (((u64)msg->address_hi) << 32) | msg->address_lo;
@@ -313,6 +466,9 @@ static int ummu_device_setup_msis(struct ummu_device *ummu)
 	/* Clear the MSI address regs */
 	writeq_relaxed(0, ummu->base + UMMU_EVENT_QUE_MSI_ADDR0);
 	writeq_relaxed(0, ummu->base + UMMU_GLB_ERR_INT_MSI_ADDR0);
+
+	if (ummu->impl_ops && ummu->impl_ops->set_msis)
+		ummu->impl_ops->set_msis(ummu);
 
 	/* Allocate MSIs for evtq, gerror */
 	ret = platform_device_msi_init_and_alloc_irqs(dev, UMMU_MAX_MSIS, ummu_write_msi_msg);
@@ -384,6 +540,9 @@ void ummu_setup_irqs(struct ummu_device *ummu)
 	else
 		dev_warn(ummu->dev,
 			 "no gerr irq - errors will not be reported!\n");
+
+	if (ummu->impl_ops && ummu->impl_ops->setup_irqs)
+		ummu->impl_ops->setup_irqs(ummu);
 
 	ummu_enable_irqs(ummu);
 }

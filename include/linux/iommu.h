@@ -78,6 +78,7 @@ struct iommu_fault_page_request {
 #define IOMMU_FAULT_PAGE_REQUEST_PASID_VALID	(1 << 0)
 #define IOMMU_FAULT_PAGE_REQUEST_LAST_PAGE	(1 << 1)
 #define IOMMU_FAULT_PAGE_RESPONSE_NEEDS_PASID	(1 << 2)
+#define IOMMU_FAULT_PAGE_REQUEST_PRIV_DATA	(1 << 3)
 	u32	flags;
 	u32	pasid;
 	u32	grpid;
@@ -351,7 +352,7 @@ struct iommu_iort_rmr_data {
  * @IOMMU_DEV_FEAT_KSVA: Shared Virtual Addresses of the kernel. When
  *			 enabled, %IOMMU_DEV_FEAT_IOPF must be disabled.
  *
- * Device drivers enable a feature using iommu_dev_enable_feature().
+ * Device drivers enable a feature using ummu_dev_enable_feat().
  */
 enum iommu_dev_features {
 	IOMMU_DEV_FEAT_SVA,
@@ -413,15 +414,23 @@ struct iommu_iotlb_gather {
  *
  * @va: IOVA representing the start of the range to be flushed
  * @size: representing the size of the range to be flushed
+ * @plbi_list: other plbi to be flushed
  *
  * This structure is intended to be updated by invoking the ->grant()
  * or ->ungrant() function in struct iommu_ops before eventually being passed
- * into iommu_plb_sync(). In the ->grant() and ->ungrant() function,
- * drivers can adjust the range to be flushed.
+ * into iommu_plb_sync(). In the ->grant() and ->ungrant() functions,
+ * drivers can adjust the range to be flushed,
+ * and add extra plbi cmds to plbi_list.
  */
 struct iommu_plb_gather {
 	void *va;
 	size_t size;
+	struct list_head plbi_list;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 /**
@@ -754,19 +763,26 @@ struct iommu_ops {
 			 enum iommu_hw_info_type *type);
 
 	/* Domain allocation and freeing by the iommu driver */
-#if IS_ENABLED(CONFIG_FSL_PAMU)
+#if IS_ENABLED(CONFIG_FSL_PAMU) || IS_ENABLED(CONFIG_UB_UMMU)
 	struct iommu_domain *(*domain_alloc)(unsigned iommu_domain_type);
 #endif
 	struct iommu_domain *(*domain_alloc_identity)(struct device *dev);
 	struct iommu_domain *(*domain_alloc_paging_flags)(
 		struct device *dev, u32 flags,
 		const struct iommu_user_data *user_data);
+	struct iommu_domain *(*domain_alloc_paging_flags_v2)(
+		struct device *dev, u32 flags, struct kvm *kvm,
+		const struct iommu_user_data *user_data);
+
 	struct iommu_domain *(*domain_alloc_paging)(struct device *dev);
 	struct iommu_domain *(*domain_alloc_sva)(struct device *dev,
 						 struct mm_struct *mm);
 	struct iommu_domain *(*domain_alloc_nested)(
 		struct device *dev, struct iommu_domain *parent, u32 flags,
 		const struct iommu_user_data *user_data);
+	struct iommu_domain *(*domain_alloc_nested_v2)(
+		struct device *dev, struct iommu_domain *parent, u32 flags,
+		struct kvm *kvm, const struct iommu_user_data *user_data);
 
 	struct iommu_device *(*probe_device)(struct device *dev);
 	void (*release_device)(struct device *dev);
@@ -780,10 +796,15 @@ struct iommu_ops {
 	bool (*is_attach_deferred)(struct device *dev);
 
 	/* Per device IOMMU features */
+	int (*dev_enable_feat)(struct device *dev, enum iommu_dev_features f);
+	int (*dev_disable_feat)(struct device *dev, enum iommu_dev_features f);
+
 	void (*page_response)(struct device *dev, struct iopf_fault *evt,
 			      struct iommu_page_response *msg);
 
 	int (*def_domain_type)(struct device *dev);
+	void (*remove_dev_pasid)(struct device *dev, ioasid_t pasid,
+			  struct iommu_domain *domain);
 
 	size_t (*get_viommu_size)(struct device *dev,
 				  enum iommu_viommu_type viommu_type);
@@ -1043,6 +1064,13 @@ static inline void iommu_iotlb_gather_init(struct iommu_iotlb_gather *gather)
 	};
 }
 
+static inline void iommu_plb_gather_init(struct iommu_plb_gather *plb_gather)
+{
+	plb_gather->va = 0;
+	plb_gather->size = 0;
+	INIT_LIST_HEAD(&plb_gather->plbi_list);
+}
+
 extern int bus_iommu_probe(const struct bus_type *bus);
 extern bool iommu_present(const struct bus_type *bus);
 extern bool device_iommu_capable(struct device *dev, enum iommu_cap cap);
@@ -1130,6 +1158,7 @@ extern int iommu_clear_dirty_log(struct iommu_domain *domain, unsigned long iova
 				 unsigned long bitmap_pgshift);
 
 void iommu_set_dma_strict(void);
+extern bool iommu_default_dma_strict(void);
 
 extern int report_iommu_fault(struct iommu_domain *domain, struct device *dev,
 			      unsigned long iova, int flags);
@@ -1359,6 +1388,9 @@ void iommu_for_each_dev(struct iommu_dev_iter *iter);
 extern struct mutex iommu_probe_device_lock;
 int iommu_probe_device(struct device *dev);
 
+int iommu_dev_enable_feature(struct device *dev, enum iommu_dev_features f);
+int iommu_dev_disable_feature(struct device *dev, enum iommu_dev_features f);
+
 int iommu_device_use_default_domain(struct device *dev);
 void iommu_device_unuse_default_domain(struct device *dev);
 
@@ -1502,6 +1534,11 @@ static inline void iommu_set_default_translated(bool cmd_line)
 }
 
 static inline bool iommu_default_passthrough(void)
+{
+	return true;
+}
+
+static inline bool iommu_default_dma_strict(void)
 {
 	return true;
 }
@@ -1678,6 +1715,18 @@ static inline int iommu_fwspec_init(struct device *dev,
 
 static inline int iommu_fwspec_add_ids(struct device *dev, u32 *ids,
 				       int num_ids)
+{
+	return -ENODEV;
+}
+
+static inline int
+iommu_dev_enable_feature(struct device *dev, enum iommu_dev_features feat)
+{
+	return -ENODEV;
+}
+
+static inline int
+iommu_dev_disable_feature(struct device *dev, enum iommu_dev_features feat)
 {
 	return -ENODEV;
 }

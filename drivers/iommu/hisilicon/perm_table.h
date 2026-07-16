@@ -43,7 +43,8 @@ struct ummu_mapt_table_node {
 	u32 next_block : 1;
 	u32 e_bit : 1;
 	u32 permission : 6;
-	u32 reserved_0 : 2;
+	u32 f_bit : 1;
+	u32 reserved_0 : 1;
 	u32 next_lv_offset_low : 20;
 
 	u32 next_lv_offset_high : 10;
@@ -101,6 +102,8 @@ struct ummu_mapt_info {
 	} block_base;
 
 	u16 valid;
+	u8 positive_plbi;
+	u8 free_bit;
 };
 
 struct ummu_seg_info {
@@ -134,7 +137,9 @@ struct ummu_data_info {
 	enum ummu_ebit_state e_bit;
 	enum ummu_grant_op_type op;
 	struct ummu_mapt_info *mapt_info;
-	uint8_t lvl;
+	u8 lvl;
+	u8 head_flag;
+	struct ummu_plbi_gather *ummu_gather;
 };
 
 struct ummu_domain;

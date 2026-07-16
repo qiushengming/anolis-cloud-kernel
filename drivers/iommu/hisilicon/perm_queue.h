@@ -10,8 +10,8 @@
 
 #define UMMU_INVALID_QID ((u32)-1)
 
-#define PQ_WRAP(idx, size) ((idx) & (size))
-#define PQ_IDX(idx, size) ((idx) & ((size) - 1))
+#define PCMDQ_ENT_BYTES 16U
+#define PCPLQ_ENT_BYTES 4U
 
 int ummu_device_init_permqs(struct ummu_device *ummu);
 void ummu_device_uninit_permqs(struct ummu_device *ummu);

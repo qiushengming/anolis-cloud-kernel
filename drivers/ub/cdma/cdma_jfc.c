@@ -149,7 +149,8 @@ static int cdma_get_jfc_buf(struct cdma_dev *cdev,
 
 	if (udata) {
 		jfc->buf.umem = cdma_umem_get(cdev, ucmd->buf_addr,
-					      ucmd->buf_len, false);
+					      ucmd->buf_len, false,
+					      jfc->base.ctx);
 		if (IS_ERR(jfc->buf.umem)) {
 			ret = PTR_ERR(jfc->buf.umem);
 			dev_err(cdev->dev, "get umem failed, ret = %d.\n",
@@ -159,7 +160,7 @@ static int cdma_get_jfc_buf(struct cdma_dev *cdev,
 		jfc->buf.addr = ucmd->buf_addr;
 		ret = cdma_pin_sw_db(jfc->base.ctx, &jfc->db);
 		if (ret)
-			cdma_umem_release(jfc->buf.umem, false);
+			cdma_put_umem(jfc->buf.umem, false);
 
 		return ret;
 	}
@@ -190,7 +191,7 @@ static void cdma_free_jfc_buf(struct cdma_dev *cdev, struct cdma_jfc *jfc)
 
 	if (!jfc->buf.kva) {
 		cdma_unpin_sw_db(jfc->base.ctx, &jfc->db);
-		cdma_unpin_queue_addr(jfc->buf.umem);
+		cdma_put_umem(jfc->buf.umem, false);
 	} else {
 		size = jfc->buf.entry_size * jfc->buf.entry_cnt;
 		cdma_k_free_buf(cdev, size, &jfc->buf);
@@ -249,15 +250,37 @@ static int cdma_query_jfc_destroy_done(struct cdma_dev *cdev, uint32_t jfcn)
 	return ret;
 }
 
-static int cdma_destroy_and_flush_jfc(struct cdma_dev *cdev, u32 jfcn)
+static int cdma_post_destroy_jfc_mbox(struct cdma_dev *cdev, u32 jfcn,
+				      enum cdma_jfc_state state)
+{
+	struct ubase_mbx_attr attr = { 0 };
+	struct cdma_jfc_ctx ctx = { 0 };
+
+	ctx.state = state;
+	cdma_fill_mbx_attr(&attr, jfcn, CDMA_CMD_DESTROY_JFC_CONTEXT, 0);
+
+	return cdma_post_mailbox_ctx(cdev, (void *)&ctx, sizeof(ctx), &attr);
+}
+
+static int cdma_destroy_and_flush_jfc(struct cdma_dev *cdev,
+				      struct cdma_jfc *jfc)
 {
 #define QUERY_MAX_TIMES 5
+	struct cdma_context *ctx = jfc->base.ctx;
+	u32 jfcn = jfc->jfcn;
 	u32 wait_times = 0;
 	int ret;
 
+	if (cdev->status == CDMA_INVALID || (ctx && ctx->invalid)) {
+		dev_info(cdev->dev,
+			 "resetting Ignore jfc ctx, jfcn = %u\n", jfcn);
+		return 0;
+	}
+
 	ret = cdma_post_destroy_jfc_mbox(cdev, jfcn, CDMA_JFC_STATE_INVALID);
 	if (ret) {
-		dev_err(cdev->dev, "post mbox to destroy jfc failed, id: %u.\n", jfcn);
+		dev_err(cdev->dev, "post mbox to destroy jfc failed, id: %u.\n",
+			jfcn);
 		return ret;
 	}
 
@@ -394,8 +417,9 @@ static enum jfc_poll_state cdma_parse_cqe_for_jfc(struct cdma_dev *cdev,
 	cr->remote_id = cqe->rmt_idx;
 
 	if (cqe->status)
-		dev_warn(cdev->dev, "get sq %u cqe status abnormal, ci = %u, pi = %u.\n",
-			 queue->id, queue->ci, queue->pi);
+		dev_warn(cdev->dev,
+			 "get sq %u cqe status abnormal, ci = %u, pi = %u, status = %u, substatus = %u.\n",
+			 queue->id, queue->ci, queue->pi, cqe->status, cqe->substatus);
 
 	if (cdma_update_flush_cr(queue, cqe, cr)) {
 		dev_err(cdev->dev,
@@ -454,18 +478,6 @@ static int cdma_post_create_jfc_mbox(struct cdma_dev *cdev, struct cdma_jfc *jfc
 	return cdma_post_mailbox_ctx(cdev, (void *)&ctx, sizeof(ctx), &attr);
 }
 
-int cdma_post_destroy_jfc_mbox(struct cdma_dev *cdev, u32 jfcn,
-			       enum cdma_jfc_state state)
-{
-	struct ubase_mbx_attr attr = { 0 };
-	struct cdma_jfc_ctx ctx = { 0 };
-
-	ctx.state = state;
-	cdma_fill_mbx_attr(&attr, jfcn, CDMA_CMD_DESTROY_JFC_CONTEXT, 0);
-
-	return cdma_post_mailbox_ctx(cdev, (void *)&ctx, sizeof(ctx), &attr);
-}
-
 struct cdma_base_jfc *cdma_create_jfc(struct cdma_dev *cdev,
 				      struct cdma_jfc_cfg *cfg,
 				      struct cdma_udata *udata)
@@ -511,7 +523,7 @@ struct cdma_base_jfc *cdma_create_jfc(struct cdma_dev *cdev,
 	jfc->base.jfce_handler = cdma_jfc_comp_event_cb;
 	jfc->base.dev = cdev;
 
-	dev_dbg(cdev->dev, "create jfc id = %u, queue id = %u.\n",
+	dev_info(cdev->dev, "create jfc, id = %u, queue id = %u.\n",
 		jfc->jfcn, cfg->queue_id);
 
 	return &jfc->base;
@@ -544,8 +556,7 @@ int cdma_delete_jfc(struct cdma_dev *cdev, u32 jfcn,
 		jfcn < cdev->caps.jfc.start_idx) {
 		dev_err(cdev->dev,
 			"jfc id invalid, jfcn = %u, start_idx = %u, max_cnt = %u.\n",
-			jfcn, cdev->caps.jfc.start_idx,
-			cdev->caps.jfc.max_cnt);
+			jfcn, cdev->caps.jfc.start_idx, cdev->caps.jfc.max_cnt);
 		return -EINVAL;
 	}
 
@@ -555,9 +566,10 @@ int cdma_delete_jfc(struct cdma_dev *cdev, u32 jfcn,
 		return -EINVAL;
 	}
 
-	ret = cdma_destroy_and_flush_jfc(cdev, jfc->jfcn);
+	ret = cdma_destroy_and_flush_jfc(cdev, jfc);
 	if (ret)
-		dev_err(cdev->dev, "jfc delete failed, jfcn = %u.\n", jfcn);
+		dev_err(cdev->dev, "jfc delete failed, jfcn = %u, ret = %d.\n",
+			jfcn, ret);
 
 	if (refcount_dec_and_test(&jfc->event_refcount))
 		complete(&jfc->event_comp);
@@ -571,7 +583,7 @@ int cdma_delete_jfc(struct cdma_dev *cdev, u32 jfcn,
 		arg->out.async_events_reported = jfc_event->async_events_reported;
 	}
 
-	pr_debug("Leave %s, jfcn: %u.\n", __func__, jfc->jfcn);
+	dev_info(cdev->dev, "delete jfc, id = %u.\n", jfc->jfcn);
 
 	cdma_release_jfc_event(jfc);
 	kfree(jfc);

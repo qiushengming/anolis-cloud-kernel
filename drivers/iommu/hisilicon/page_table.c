@@ -8,6 +8,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/io-pgtable.h>
 #include <linux/errno.h>
+#include <linux/kvm_host.h>
 
 #include "flush.h"
 #include "cfg_table.h"
@@ -60,7 +61,7 @@ static int ummu_get_pgtable_cfg(struct ummu_domain *ummu_domain,
 
 	cfg->pgtbl_ops =
 		alloc_io_pgtable_ops(cfg->fmt, &cfg->pgtbl_cfg, ummu_domain);
-	if (WARN_ON(!cfg->pgtbl_ops)) {
+	if (!cfg->pgtbl_ops) {
 		pr_err("alloc page table failed, check page table config!\n");
 		return -ENOMEM;
 	}
@@ -96,6 +97,11 @@ static int ummu_domain_collect_pgtable_s2(struct ummu_domain *ummu_domain,
 		&pgtbl_cfg->arm_lpae_s2_cfg.vtcr;
 	struct ummu_s2_cfg *cfg = &ummu_domain->cfgs.s2_cfg;
 	int vmid = 0;
+
+	if (ummu_domain->kvm)
+		vmid = kvm_pinned_vmid_get(ummu_domain->kvm);
+	if (vmid < 0)
+		return vmid;
 
 	cfg->vmid = (u16)vmid;
 	cfg->vttbr = pgtbl_cfg->arm_lpae_s2_cfg.vttbr;
@@ -142,4 +148,87 @@ int ummu_domain_collect_pgtable(struct ummu_domain *ummu_domain)
 		(dma_addr_t)DMA_BIT_MASK(cfg.pgtbl_cfg.ias);
 	ummu_domain->base_domain.domain.geometry.force_aperture = true;
 	return 0;
+}
+
+static int ummu_map_identity_pages(void)
+{
+	struct io_pgtable_ops *pgtbl_ops = identity_u_domain.cfgs.pgtbl_ops;
+	size_t pgcount = 0;
+	size_t pgsize = 0;
+	size_t mapped = 0;
+	size_t step = 0;
+	u64 start;
+	u64 end;
+	int ret = 0;
+
+	switch (PAGE_SIZE) {
+	case SZ_4K:
+		pgcount = SZ_512;
+		pgsize = SZ_1G;
+		break;
+	case SZ_64K:
+		pgcount = SZ_8K;
+		pgsize = SZ_512M;
+		break;
+	default:
+		pr_err("PAGE_SIZE not supported: %lu\n", PAGE_SIZE);
+		return -EINVAL;
+	}
+
+	if (!pgtbl_ops)
+		return -EOPNOTSUPP;
+	end = ALIGN(identity_u_domain.base_domain.domain.geometry.aperture_end +
+		1, pgsize);
+	step = pgsize * pgcount;
+	for (start = 0; start < end; start += step) {
+		ret = pgtbl_ops->map_pages(pgtbl_ops, start, start, pgsize,
+					   pgcount, (IOMMU_READ | IOMMU_WRITE),
+					   GFP_KERNEL, &mapped);
+		if (ret) {
+			pr_err("map failed, ret = %d!\n", ret);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+int ummu_global_identity_pgtbl_init(struct ummu_device *ummu)
+{
+	int ret;
+
+	if (identity_u_domain.cfgs.pgtbl_ops)
+		return 0;
+
+	identity_u_domain.base_domain.domain.type = IOMMU_DOMAIN_IDENTITY;
+	identity_u_domain.base_domain.core_dev = &ummu->core_dev;
+	identity_u_domain.base_domain.tid = UMMU_INVALID_TID;
+	identity_u_domain.cfgs.stage = UMMU_DOMAIN_S1;
+	mutex_init(&identity_u_domain.init_mutex);
+
+	ret = ummu_domain_collect_pgtable(&identity_u_domain);
+	if (ret) {
+		pr_err("init global identity page table failed, ret = %d\n", ret);
+		return ret;
+	}
+
+	ret = ummu_map_identity_pages();
+	if (ret) {
+		ummu_global_identity_pgtbl_free();
+		return ret;
+	}
+
+	identity_u_domain.cfgs.s1_cfg.tct_cfg = ummu->local_tct_cfg;
+	return 0;
+}
+
+void ummu_global_identity_pgtbl_free(void)
+{
+	free_io_pgtable_ops(identity_u_domain.cfgs.pgtbl_ops);
+	identity_u_domain.cfgs.pgtbl_ops = NULL;
+}
+
+struct ummu_domain *ummu_get_global_identity_domain(void)
+{
+	return &identity_u_domain;
 }

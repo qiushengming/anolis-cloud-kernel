@@ -51,6 +51,9 @@
 #define TECT_ENT0_COUNT_HINT GENMASK(30, 27)
 #define TECT_ENT0_S2_VMID GENMASK_ULL(47, 32)
 
+#define TECTE_0_NESTED_CONFIG_MASK \
+	cpu_to_le64(TECT_ENT0_V | TECT_ENT0_ST_MODE)
+
 #define TECT_ENT1_TCT_MAX_NUM GENMASK(4, 0)
 #define TECT_ENT1_TCT_PTR GENMASK_ULL(51, 6)
 #define TECT_ENT1_TCT_FMT GENMASK_ULL(53, 52)
@@ -65,6 +68,12 @@
 #define TECT_ENT1_MD_CACHE_WBRA 1UL
 #define TECT_ENT1_MD_CACHE_WT 2UL
 #define TECT_ENT1_MD_CACHE_WB 3UL
+
+#define TECTE_1_NESTED_CONFIG_MASK \
+	cpu_to_le64(TECT_ENT1_TCT_MAX_NUM | TECT_ENT1_TCT_PTR | \
+		    TECT_ENT1_TCT_FMT | TECT_ENT1_TCT_STALL_DISABLE | \
+		    TECT_ENT1_TCT_PTR_MD0 | TECT_ENT1_TCT_PTR_MD1 | \
+		    TECT_ENT1_TCT_PTR_MSD)
 
 #define TECT_ENT2_NS_S2_TSZ GENMASK(5, 0)
 #define TECT_ENT2_NS_S2_SL GENMASK(7, 6)
@@ -137,6 +146,7 @@ struct ummu_tecte_data {
 #define TCT_ENT0_AFFD (1UL << 9)
 #define TCT_ENT0_HDF (1UL << 10)
 #define TCT_ENT0_HAF (1UL << 11)
+#define TCT_ENT0_FBS (1UL << 12)
 #define TCT_ENT0_FBR (1UL << 13)
 #define TCT_ENT0_FBA (1UL << 14)
 #define TCT_ENT0_ASH (1UL << 15)
@@ -148,10 +158,14 @@ struct ummu_tecte_data {
 #define TCT_ENT0_MAPT_EN (1UL << 19)
 #define TCT_ENT0_MAC_EN (1UL << 20)
 #define TCT_ENT0_EBIT_EN (1UL << 21)
+#define TCT_ENT0_MATT_BYPASS (1UL << 22)
 #define TCT_ENT0_ASID GENMASK_ULL(47, 32)
 
 #define TCT_ENT1_SZ GENMASK(5, 0)
 #define TCT_ENT1_TGS GENMASK(7, 6)
+#define TCT_TCR_TGS_4K 0
+#define TCT_TCR_TGS_64K 1
+#define TCT_TCR_TGS_16K 2
 #define TCT_ENT1_TTWD (1UL << 8)
 #define TCT_ENT1_MD0 GENMASK(10, 9)
 #define TCT_ENT1_MD1 GENMASK(12, 11)
@@ -266,7 +280,7 @@ int ummu_get_tecte_tag_by_eid(eid_t eid, u32 *tecte_tag);
 int ummu_add_eid(struct ummu_core_device *core_dev, guid_t *guid, eid_t eid, enum eid_type type);
 void ummu_del_eid(struct ummu_core_device *core_dev, guid_t *guid, eid_t eid, enum eid_type type);
 char *ummu_get_eid_list(void);
-bool ummu_check_dev_to_vm(struct ummu_master *master);
+bool dev_work_on_local(struct ummu_master *master);
 void ummu_build_s2_domain_tecte(struct ummu_domain *u_domain,
 				struct ummu_tecte_data *target);
 int ummu_set_domain_cfgs_tag(struct ummu_domain_cfgs *cfgs,

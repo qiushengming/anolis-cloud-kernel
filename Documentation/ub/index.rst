@@ -8,8 +8,11 @@ UnifiedBus Subsystem
 =====================
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 4
 
    ubase/index
    ubfi/index
    ubus/index
+   ummu/index
+   cdma/index
+   urma/ipourma/index

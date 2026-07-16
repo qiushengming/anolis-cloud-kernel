@@ -7,7 +7,9 @@
 #include <linux/platform_device.h>
 #include <linux/preempt.h>
 #include <linux/bitops.h>
+#include <linux/ummu_core.h>
 
+#include "trace/trace.h"
 #include "ummu.h"
 #include "queue.h"
 #include "flush.h"
@@ -134,6 +136,9 @@ static void __ummu_tlbi_range(struct ummu_mcmdq_ent *cmd,
 	if (range->iova == ULONG_MAX || range->size == 0)
 		return;
 
+	trace_ummu_iotlb_sync(domain->base_domain.tid, range->iova,
+			      range->size, dev_name(ummu->dev));
+
 	if (!(ummu->cap.features & UMMU_FEAT_RANGE_INV)) {
 		ummu_range_tlbi_nofeat(ummu, cmd, range);
 		return;
@@ -193,29 +198,24 @@ void ummu_tlbi_context(void *cookie)
 	err = ummu_domain_tlbi_cmd(domain, UMMU_TLBI_SCOPE_CTX, UMMU_TLBI_SCENE_DMA, &cmd);
 	if (err)
 		return;
-
+	trace_ummu_flush_iotlb_all(domain->base_domain.tid, dev_name(ummu->dev));
 	ummu_mcmdq_issue_cmd_with_sync(ummu, &cmd);
 }
 
 void ummu_tlbi_walk(unsigned long iova, size_t size, size_t granule,
 		    void *cookie)
 {
-	struct ummu_domain *domain = (struct ummu_domain *)cookie;
-	struct ummu_tlb_range range = {
-		.iova = iova,
-		.size = size,
-		.granule = granule,
-	};
+	struct ummu_domain *u_domain = (struct ummu_domain *)cookie;
 
-	ummu_tlbi_range(&range, false, domain);
+	ummu_core_tlb_inv_walk(u_domain->domain, iova, size, granule);
 }
 
 void ummu_tlbi_page(struct iommu_iotlb_gather *gather, unsigned long iova,
 		    size_t granule, void *cookie)
 {
-	struct ummu_domain *domain = (struct ummu_domain *)cookie;
+	struct ummu_domain *u_domain = (struct ummu_domain *)cookie;
 
-	iommu_iotlb_gather_add_page(&domain->base_domain.domain, gather, iova, granule);
+	iommu_iotlb_gather_add_page(u_domain->domain, gather, iova, granule);
 }
 
 void ummu_iotlb_sync(struct iommu_domain *domain,
@@ -231,7 +231,7 @@ void ummu_iotlb_sync(struct iommu_domain *domain,
 	ummu_tlbi_range(&range, true, u_domain);
 }
 
-void ummu_non_agent_iotlb_sync(struct iommu_domain *domain,
+void ummu_device_tlb_inv_walk(struct iommu_domain *domain,
 			       struct iommu_iotlb_gather *gather)
 {
 	struct ummu_domain *u_domain = to_ummu_domain(domain);
@@ -244,11 +244,27 @@ void ummu_non_agent_iotlb_sync(struct iommu_domain *domain,
 	ummu_tlbi_range(&range, false, u_domain);
 }
 
+void ummu_flush_iotlb_all_asid(struct iommu_domain *domain)
+{
+	struct ummu_domain *u_domain = to_ummu_domain(domain);
+
+	u_domain->tlbi_asid = true;
+	ummu_tlbi_context(u_domain);
+}
+
 void ummu_flush_iotlb_all(struct iommu_domain *domain)
 {
 	struct ummu_domain *u_domain = to_ummu_domain(domain);
 
 	ummu_tlbi_context(u_domain);
+}
+
+void ummu_sync_iommu_domain(struct ummu_base_domain *base_domain,
+			    struct iommu_domain *domain)
+{
+	struct ummu_domain *u_domain = to_ummu_domain(&base_domain->domain);
+
+	u_domain->domain = domain;
 }
 
 void ummu_init_flush_iotlb(struct ummu_device *ummu)
@@ -290,6 +306,7 @@ void ummu_sync_tect_range(struct ummu_device *ummu, u32 tecte_tag,
 		},
 	};
 
+	trace_ummu_sync_tect_range(dev_name(ummu->dev), tecte_tag, range);
 	ummu_mcmdq_issue_cmd_with_sync(ummu, &cmd_cfgi_tect_range);
 }
 
@@ -308,6 +325,7 @@ void ummu_device_sync_tect(struct ummu_device *ummu, u32 tecte_tag)
 		},
 	};
 
+	trace_ummu_sync_tect(dev_name(ummu->dev), tecte_tag);
 	ummu_mcmdq_issue_cmd_with_sync(ummu, &cmd_cfgi_tect);
 }
 
@@ -322,16 +340,19 @@ void ummu_sync_tct(struct ummu_device *ummu, u32 tecte_tag, u32 tid,
 			.deid_0 = tecte_tag,
 		},
 	};
-	struct ummu_mcmdq_ent cmd_plbi_all = {
-		.opcode = CMD_PLBI_OS_EIDTID,
-		.plbi = {
-			.tid = tid,
-			.tecte_tag = tecte_tag,
-		},
-	};
 
-	if (!ummu->cap.prod_ver)
+	if (ummu->cap.options & UMMU_OPT_SYNC_WITH_PLBI) {
+		struct ummu_mcmdq_ent cmd_plbi_all = {
+			.opcode = CMD_PLBI_OS_EIDTID,
+			.plbi = {
+				.tid = tid,
+				.tecte_tag = tecte_tag,
+			},
+		};
 		ummu_mcmdq_issue_cmd(ummu, &cmd_plbi_all);
+	}
+
+	trace_ummu_sync_tct(dev_name(ummu->dev), tecte_tag, tid, leaf);
 	ummu_mcmdq_issue_cmd_with_sync(ummu, &cmd_cfgi_tct);
 }
 
@@ -344,6 +365,7 @@ void ummu_sync_tct_all(struct ummu_device *ummu, u32 tecte_tag)
 		},
 	};
 
+	trace_ummu_sync_tct_all(dev_name(ummu->dev), tecte_tag);
 	ummu_mcmdq_issue_cmd_with_sync(ummu, &cmd_cfgi_tct_all);
 }
 
@@ -410,6 +432,18 @@ void ummu_device_flush_plb_all(struct iommu_domain *domain)
 			dev_err(ummu->dev,
 				"issue plbi tid cmd failed, idx = %u, ret = %d\n", idx, ret);
 	}
+}
+
+void ummu_device_flush_ioplb_all(struct ummu_device *ummu)
+{
+	struct ummu_mcmdq_ent cmd = {
+		.opcode = CMD_PLBI_OS_EID,
+		.plbi = {
+			.tecte_tag = LOCAL_TECT_TAG,
+		},
+	};
+
+	ummu_mcmdq_issue_cmd_with_sync(ummu, &cmd);
 }
 
 int ummu_device_check_pa_continuity(struct ummu_device *ummu, u64 addr,

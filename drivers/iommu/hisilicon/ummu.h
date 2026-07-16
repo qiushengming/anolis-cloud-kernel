@@ -15,9 +15,21 @@
 
 #include "perm_table.h"
 
+#define LOCAL_TECT_TAG 0
+
+extern bool hw_bypass;
 extern struct platform_driver ummu_driver;
+extern const struct ummu_core_ops ummu_ops;
+extern const struct ummu_device_helper ummu_helper;
+
+#define MSI_IOVA_BASE 0x8000000
+#define MSI_IOVA_LENGTH 0x100000
+
 #define EID_HIGH_SZ_SHIFT 64
 #define UMMU_CTRL_PAGE_SIZE ((PAGE_SIZE == SZ_4K) ? SZ_4K : SZ_64K)
+
+#define UMMU_GFP(gfp) \
+	(IS_ENABLED(CONFIG_UB_HIGHUSER_MOVABLE) ? GFP_HIGHUSER_MOVABLE : gfp)
 
 /* target context table structures */
 struct ummu_l1_tct_desc {
@@ -25,14 +37,14 @@ struct ummu_l1_tct_desc {
 	phys_addr_t	l2ptr_phys;
 };
 
-enum ummu_ver {
-	NO_PROD_ID = 0,
-	MAX_VER,
-};
+bool ummu_sva_separated_enabled(void);
 
 enum ummu_device_msi_index {
 	EVTQ_MSI_INDEX,
 	GERROR_MSI_INDEX,
+#if IS_ENABLED(CONFIG_UB_UBMEM_UMMU)
+	RESERVED_MSI_INDEX,
+#endif
 	UMMU_MAX_MSIS,
 };
 
@@ -80,6 +92,15 @@ enum ummu_domain_stage {
 	UMMU_DOMAIN_S2,
 };
 
+enum ummu_sva_mode {
+	UMMU_MODE_DMA = 0,
+	UMMU_MODE_KSVA,
+	UMMU_MODE_SVA,
+	UMMU_MODE_SVA_DISABLE_PTB,
+	UMMU_MODE_SVA_SEPARATE_PG,
+	UMMU_MODE_END,
+};
+
 struct ummu_ll_queue {
 	union {
 		u64 val;
@@ -121,6 +142,7 @@ struct ummu_mcmdq {
 
 struct ummu_evtq {
 	struct ummu_queue q;
+	struct iopf_queue *iopf;
 	u32 max_stalls;
 };
 
@@ -140,21 +162,20 @@ struct ummu_capability {
 #define UMMU_FEAT_HA			BIT(12)
 #define UMMU_FEAT_HD			BIT(13)
 #define UMMU_FEAT_MTM			BIT(14)
-#define UMMU_FEAT_TT_LE			BIT(15)
-#define UMMU_FEAT_TT_BE			BIT(16)
-#define UMMU_FEAT_COHERENCY		BIT(17)
-#define UMMU_FEAT_BBML1			BIT(18)
-#define UMMU_FEAT_BBML2			BIT(19)
-#define UMMU_FEAT_VAX			BIT(20)
-#define UMMU_FEAT_BTM			BIT(21)
-#define UMMU_FEAT_SVA			BIT(22)
-#define UMMU_FEAT_E2H			BIT(23)
-#define UMMU_FEAT_MAPT			BIT(24)
-#define UMMU_FEAT_RANGE_PLBI		BIT(25)
-#define UMMU_FEAT_TOKEN_CHK		BIT(26)
-#define UMMU_FEAT_PERMQ			BIT(27)
-#define UMMU_FEAT_NESTING		BIT(28)
-
+#define UMMU_FEAT_COHERENCY		BIT(15)
+#define UMMU_FEAT_BBML1			BIT(16)
+#define UMMU_FEAT_BBML2			BIT(17)
+#define UMMU_FEAT_VAX			BIT(18)
+#define UMMU_FEAT_BTM			BIT(19)
+#define UMMU_FEAT_SVA			BIT(20)
+#define UMMU_FEAT_E2H			BIT(21)
+#define UMMU_FEAT_MAPT			BIT(22)
+#define UMMU_FEAT_RANGE_PLBI		BIT(23)
+#define UMMU_FEAT_TOKEN_CHK		BIT(24)
+#define UMMU_FEAT_PERMQ			BIT(25)
+#define UMMU_FEAT_NESTING		BIT(26)
+#define UMMU_FEAT_FREE_BIT		BIT(27)
+#define UMMU_FEAT_PPLBI			BIT(28)
 	u32 features;
 	u32 deid_bits;
 	u32 tid_bits;
@@ -165,6 +186,14 @@ struct ummu_capability {
 #define UMMU_OPT_MSIPOLL		(1UL << 0)
 #define UMMU_OPT_DOUBLE_PLBI		(1UL << 1)
 #define UMMU_OPT_KCMD_PLBI		(1UL << 2)
+#define UMMU_OPT_CHK_MAPT_CONTINUITY	(1UL << 3)
+#define UMMU_OPT_ONE_MCMDQ		(1UL << 4)
+#define UMMU_OPT_SYNC_WITH_PLBI		(1UL << 5)
+#define UMMU_OPT_KV_CAM_CONTINUITY	(1UL << 6)
+#define UMMU_OPT_UMAU			(1UL << 7)
+#define UMMU_OPT_DOUBLE_TLBI		(1UL << 8)
+#define UMMU_OPT_TLBI_LIMIT_SCALE	(1UL << 9)
+#define UMMU_OPT_MCMDQ_DECREASE		(1UL << 10)
 	u32 options;
 
 #define UMMU_MAX_ASIDS			(1UL << 16)
@@ -172,7 +201,6 @@ struct ummu_capability {
 #define UMMU_MAX_VMIDS			(1UL << 16)
 	unsigned int vmid_bits;
 
-	bool support_mapt;
 	u32 mcmdq_log2num;
 	u32 mcmdq_log2size;
 	u32 evtq_log2num;
@@ -184,7 +212,6 @@ struct ummu_capability {
 	} permq_ent_num;
 	u32 mtm_gp_max;
 	u32 mtm_id_max;
-	u16 prod_ver;
 };
 
 struct ummu_permq_addr {
@@ -222,10 +249,30 @@ struct ummu_hash_table_cfg {
 
 /* ummu device inner helper functions */
 enum ummu_dom_cfg_sync_type {
+	SYNC_TYPE_NONE,
 	SYNC_DOM_ALL_CFG,
 	SYNC_DOM_MUTI_CFG,
-	SYNC_NESTED_DOM_MUTI_CFG,
 	SYNC_CLEAR_DOM_ALL_CFG,
+};
+
+#define UMMU_GATHER_MAX_CNT 12
+struct logic_ummu_plb {
+	u32 opcode;
+	union {
+		struct {
+			u64 va;
+			u64 size;
+		} plbi_va;
+		struct {
+			u64 lvl_idx;
+			u64 lvl_offset;
+		} plbi_f_bit;
+	};
+};
+struct ummu_plbi_gather {
+	void *cookie;
+	struct logic_ummu_plb plbis[UMMU_GATHER_MAX_CNT];
+	u32 data_cnt;
 };
 
 struct ummu_device_helper {
@@ -238,12 +285,18 @@ struct ummu_device_helper {
 		const struct iommu_user_data *user_data);
 	int (*cache_invalidate_user)(struct iommu_domain *domain,
 				     struct iommu_user_data_array *array);
+	void (*plbi_free_bit)(struct iommu_domain *domain, u32 next_lvl_idx,
+			      u32 next_lvl_offset);
+	void (*sync_iotlb_all)(struct iommu_domain *domain);
+	void (*sync_iotlb_all_asid)(struct iommu_domain *domain);
+	void (*sync_iommu_domain)(struct ummu_base_domain *base_domain,
+				  struct iommu_domain *domain);
 };
 
 struct ummu_device {
 	struct device *dev;
 	void __iomem *base;
-	void __iomem *ucmdq_ctrl_page;
+	void __iomem *permq_ctrl_page;
 
 	struct ummu_capability cap;
 
@@ -265,11 +318,17 @@ struct ummu_device {
 struct ummu_dev_impl_ops {
 	int (*hw_probe)(struct ummu_device *ummu);
 	int (*mcmdq_cfg)(struct ummu_device *ummu);
+	void (*write_msi_msg)(struct msi_desc *desc, struct msi_msg *msg);
+	void (*set_msis)(struct ummu_device *ummu);
+	void (*setup_irqs)(struct ummu_device *ummu);
+	int (*dev_probe)(struct ummu_device *ummu);
+	void (*dev_remove)(struct ummu_device *ummu);
 };
 
 struct ummu_domain_cfgs {
 	struct io_pgtable_ops *pgtbl_ops;
 	enum ummu_domain_stage stage;
+	enum ummu_sva_mode sva_mode;
 
 	u32 tecte_tag;
 
@@ -277,19 +336,32 @@ struct ummu_domain_cfgs {
 		struct ummu_s1_cfg	s1_cfg;
 		struct ummu_s2_cfg	s2_cfg;
 	};
+	bool btm_enabled : 1;
+	bool nested_parent : 1;
 };
 
 struct ummu_domain {
 	struct mutex init_mutex; /* protect domain resources */
 	struct ummu_base_domain base_domain;
+	/* belongs IOMMU framework, using for multi-instance traversal */
+	struct iommu_domain *domain;
 	u32 qid;
+	bool has_cfged;
+	bool dirty_tracking;
 	struct ummu_domain_cfgs cfgs;
+	struct kvm *kvm;
+	bool tlbi_asid;
 };
 
 /* UMMU private data for each master */
 struct ummu_master {
 	struct ummu_device	*ummu;
 	struct device		*dev;
+	bool			sva_enabled;
+	bool			iopf_enabled;
+	bool			ksva_enabled;
+	refcount_t		sva_ref;
+	refcount_t		ksva_ref;
 };
 
 static inline
@@ -324,4 +396,5 @@ bool ummu_get_mapt_blk_exp(void);
  */
 size_t ummu_get_mapt_base_blk_size(void);
 
+int ummu_bypass_dev_domain_type(struct device *dev);
 #endif /* __UMMU_H__ */

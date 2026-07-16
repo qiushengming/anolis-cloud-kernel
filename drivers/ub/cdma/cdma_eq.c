@@ -167,7 +167,7 @@ int cdma_reg_ae_event(struct auxiliary_device *adev)
 		}
 	}
 
-	dev_dbg(cdma_dev->dev, "cdma register ae event, ret = %d.\n", ret);
+	dev_info(cdma_dev->dev, "cdma register ae event, ret = %d.\n", ret);
 
 	return ret;
 }
@@ -208,8 +208,8 @@ int cdma_reg_ce_event(struct auxiliary_device *adev)
 
 	ret = ubase_comp_register(adev, cdma_jfc_completion);
 	if (ret)
-		dev_err(cdma_dev->dev,
-			"register ce event failed, ret = %d.\n", ret);
+		dev_err(cdma_dev->dev, "register ce event failed, ret = %d.\n",
+			ret);
 
 	return ret;
 }
