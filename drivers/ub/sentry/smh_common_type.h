@@ -9,7 +9,7 @@
 #ifndef SMH_COMMON_TYPE_H
 #define SMH_COMMON_TYPE_H
 
-#include <linux/firmware/ubios/cis.h>
+#include <linux/firmware/uvb/cis.h>
 #include <ub/ubus/ub-mem-decoder.h>
 #include <ub/urma/ubcore_api.h>
 #include <linux/types.h>
