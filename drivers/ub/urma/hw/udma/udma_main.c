@@ -162,6 +162,31 @@ static int udma_query_device_attr(struct ubcore_device *dev,
 	return 0;
 }
 
+static int udma_query_stats(struct ubcore_device *dev, struct ubcore_stats_key *key,
+			    struct ubcore_stats_val *val)
+{
+	struct ubcore_stats_com_val *com_val = (struct ubcore_stats_com_val *)val->addr;
+	struct udma_dev *udma_dev = to_udma_dev(dev);
+	struct ubase_ub_dl_stats dl_stats = {};
+	int ret;
+
+	ret = ubase_get_ub_port_stats(udma_dev->comdev.adev,
+				      udma_dev->port_logic_id, &dl_stats);
+	if (ret) {
+		dev_err(udma_dev->dev, "failed to query port stats, ret = %d.\n", ret);
+		return ret;
+	}
+
+	com_val->tx_pkt = dl_stats.dl_tx_busi_pkt_num;
+	com_val->rx_pkt = dl_stats.dl_rx_busi_pkt_num;
+	com_val->rx_pkt_err = 0;
+	com_val->tx_pkt_err = 0;
+	com_val->tx_bytes = 0;
+	com_val->rx_bytes = 0;
+
+	return ret;
+}
+
 static struct ubcore_ops g_dev_ops = {
 	.owner = THIS_MODULE,
 	.abi_version = 0,
@@ -179,19 +204,47 @@ static struct ubcore_ops g_dev_ops = {
 	.import_seg = udma_import_seg,
 	.unimport_seg = udma_unimport_seg,
 	.create_jfc = udma_create_jfc,
+	.modify_jfc = udma_modify_jfc,
 	.destroy_jfc = udma_destroy_jfc,
+	.rearm_jfc = udma_rearm_jfc,
 	.create_jfs = udma_create_jfs,
+	.modify_jfs = udma_modify_jfs,
 	.query_jfs = udma_query_jfs,
+	.flush_jfs = udma_flush_jfs,
 	.destroy_jfs = udma_destroy_jfs,
+	.destroy_jfs_batch = udma_destroy_jfs_batch,
 	.create_jfr = udma_create_jfr,
+	.modify_jfr = udma_modify_jfr,
+	.query_jfr = udma_query_jfr,
 	.destroy_jfr = udma_destroy_jfr,
 	.destroy_jfr_batch = udma_destroy_jfr_batch,
-	.query_jfr = udma_query_jfr,
+	.import_jfr_ex = udma_import_jfr_ex,
+	.unimport_jfr = udma_unimport_jfr,
 	.create_jetty = udma_create_jetty,
+	.modify_jetty = udma_modify_jetty,
 	.query_jetty = udma_query_jetty,
+	.flush_jetty = udma_flush_jetty,
 	.destroy_jetty = udma_destroy_jetty,
+	.destroy_jetty_batch = udma_destroy_jetty_batch,
+	.import_jetty_ex = udma_import_jetty_ex,
+	.unimport_jetty = udma_unimport_jetty,
+	.bind_jetty_ex = udma_bind_jetty_ex,
+	.unbind_jetty = udma_unbind_jetty,
 	.create_jetty_grp = udma_create_jetty_grp,
 	.delete_jetty_grp = udma_delete_jetty_grp,
+	.get_tp_list = udma_get_tp_list,
+	.set_tp_attr = udma_set_tp_attr,
+	.get_tp_attr = udma_get_tp_attr,
+	.active_tp = udma_active_tp,
+	.deactive_tp = udma_deactive_tp,
+	.user_ctl = udma_user_ctl,
+	.post_jfs_wr = udma_post_jfs_wr,
+	.post_jfr_wr = udma_post_jfr_wr,
+	.post_jetty_send_wr = udma_post_jetty_send_wr,
+	.post_jetty_recv_wr = udma_post_jetty_recv_wr,
+	.poll_jfc = udma_poll_jfc,
+	.query_stats = udma_query_stats,
+	.query_ue_idx = udma_query_ue_idx,
 };
 
 static void udma_uninit_group_table(struct udma_dev *dev, struct udma_group_table *table)
@@ -224,6 +277,7 @@ static void udma_destroy_tp_ue_idx_table(struct udma_dev *udma_dev)
 
 void udma_destroy_tables(struct udma_dev *udma_dev)
 {
+	udma_ctrlq_destroy_tpid_list(udma_dev, &udma_dev->ctrlq_tpid_table, false);
 	udma_destroy_eid_table(udma_dev);
 	mutex_destroy(&udma_dev->disable_ue_rx_mutex);
 	if (!ida_is_empty(&udma_dev->rsvd_jetty_ida_table.ida))
@@ -236,6 +290,7 @@ void udma_destroy_tables(struct udma_dev *udma_dev)
 	xa_destroy(&udma_dev->crq_nb_table);
 
 	udma_destroy_tp_ue_idx_table(udma_dev);
+	udma_destroy_npu_cb_table(udma_dev);
 
 	if (!xa_empty(&udma_dev->ksva_table))
 		dev_err(udma_dev->dev, "ksva table is not empty.\n");
@@ -285,6 +340,7 @@ static void udma_init_managed_by_ctrl_cpu_table(struct udma_dev *udma_dev)
 {
 	mutex_init(&udma_dev->eid_mutex);
 	xa_init(&udma_dev->eid_table);
+	xa_init(&udma_dev->ctrlq_tpid_table);
 }
 
 int udma_init_tables(struct udma_dev *udma_dev)

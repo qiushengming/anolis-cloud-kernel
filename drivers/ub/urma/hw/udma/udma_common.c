@@ -431,6 +431,28 @@ void udma_init_udma_table_mutex(struct xarray *table, struct mutex *udma_mutex)
 	mutex_init(udma_mutex);
 }
 
+void udma_destroy_npu_cb_table(struct udma_dev *dev)
+{
+	struct udma_ctrlq_event_nb *nb = NULL;
+	unsigned long index = 0;
+
+	mutex_lock(&dev->npu_nb_mutex);
+	if (!xa_empty(&dev->npu_nb_table)) {
+		xa_for_each(&dev->npu_nb_table, index, nb) {
+			ubase_ctrlq_unregister_crq_event(dev->comdev.adev,
+							 UBASE_CTRLQ_SER_TYPE_DEV_REGISTER,
+							 nb->opcode);
+			__xa_erase(&dev->npu_nb_table, index);
+			kfree(nb);
+			nb = NULL;
+		}
+	}
+
+	mutex_unlock(&dev->npu_nb_mutex);
+	xa_destroy(&dev->npu_nb_table);
+	mutex_destroy(&dev->npu_nb_mutex);
+}
+
 void udma_destroy_udma_table(struct udma_dev *dev, struct udma_table *table,
 				    const char *table_name)
 {
@@ -627,6 +649,35 @@ void udma_free_iova(struct udma_dev *udma_dev, size_t memory_size, void *kva_or_
 			npage, ret);
 
 	dma_free_iova(slot);
+}
+
+int udma_query_ue_idx(struct ubcore_device *ubcore_dev, struct ubcore_devid *devid,
+		      uint16_t *ue_idx)
+{
+	struct udma_dev *dev = to_udma_dev(ubcore_dev);
+	struct udma_ue_index_cmd cmd = {};
+	struct ubase_cmd_buf out;
+	struct ubase_cmd_buf in;
+	int ret;
+
+	if (!devid) {
+		dev_err(dev->dev, "failed to query ue idx, devid is NULL.\n");
+		return -EINVAL;
+	}
+
+	(void)memcpy(cmd.guid, devid->raw, sizeof(devid->raw));
+
+	udma_fill_buf(&in, UDMA_CMD_QUERY_UE_INDEX, true, sizeof(cmd), &cmd);
+	udma_fill_buf(&out, UDMA_CMD_QUERY_UE_INDEX, true, sizeof(cmd), &cmd);
+
+	ret = ubase_cmd_send_inout(dev->comdev.adev, &in, &out);
+	if (ret) {
+		dev_err(dev->dev, "failed to query ue idx, ret = %d.\n", ret);
+		return ret;
+	}
+	*ue_idx = cmd.ue_idx;
+
+	return 0;
 }
 
 void udma_dfx_ctx_print(struct udma_dev *udev, const char *name, uint32_t id, uint32_t len,

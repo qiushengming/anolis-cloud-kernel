@@ -23,6 +23,8 @@ extern bool dump_aux_info;
 
 #define UDMA_CTX_NUM 2
 
+#define UDMA_BITS_PER_INT 32
+
 #define MAX_JETTY_IN_JETTY_GRP 32
 
 #define UDMA_USER_DATA_H_OFFSET 32U
@@ -113,6 +115,7 @@ struct udma_dev {
 	struct xarray crq_nb_table;
 	struct xarray npu_nb_table;
 	struct mutex npu_nb_mutex;
+	struct xarray ctrlq_tpid_table;
 	struct xarray tpn_ue_idx_table;
 	struct ubase_event_nb *ae_event_addr[UBASE_EVENT_TYPE_MAX];
 	resource_size_t db_base;

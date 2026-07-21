@@ -569,6 +569,9 @@ static void udma_free_jfr(struct ubcore_jfr *jfr)
 	struct udma_dev *udma_dev = to_udma_dev(jfr->ub_dev);
 	struct udma_jfr *udma_jfr = to_udma_jfr(jfr);
 
+	if (udma_jfr->rq.buf.kva && jfr->jfr_cfg.jfc)
+		udma_clean_jfc(jfr->jfr_cfg.jfc, udma_jfr->rq.id, udma_dev);
+
 	if (dfx_switch)
 		udma_dfx_delete_id(udma_dev, &udma_dev->dfx_info->jfr, udma_jfr->rq.id);
 
@@ -657,4 +660,271 @@ int udma_destroy_jfr_batch(struct ubcore_jfr **jfr, int jfr_cnt, int *bad_jfr_in
 		udma_free_jfr(jfr[i]);
 
 	return 0;
+}
+
+static bool verify_modify_jfr_state(enum ubcore_jfr_state jfr_state,
+				    enum ubcore_jfr_state attr_state)
+{
+	switch (jfr_state) {
+	case UBCORE_JFR_STATE_RESET:
+		return attr_state == UBCORE_JFR_STATE_READY;
+	case UBCORE_JFR_STATE_READY:
+		return attr_state == UBCORE_JFR_STATE_ERROR;
+	case UBCORE_JFR_STATE_ERROR:
+		return attr_state == UBCORE_JFR_STATE_RESET;
+	default:
+		break;
+	}
+
+	return false;
+}
+
+static int verify_modify_jfr(struct udma_dev *udma_dev, struct udma_jfr *udma_jfr,
+			     struct ubcore_jfr_attr *attr, bool *state_flag,
+			     bool *rx_threshold_flag)
+{
+	*rx_threshold_flag = false;
+	*state_flag = false;
+
+	if (!(attr->mask & (UBCORE_JFR_RX_THRESHOLD | UBCORE_JFR_STATE))) {
+		dev_err(udma_dev->dev,
+			"modify jfr mask is error or not set, jfrn = %u.\n",
+			udma_jfr->rq.id);
+		return -EINVAL;
+	}
+
+	if (attr->mask & UBCORE_JFR_RX_THRESHOLD) {
+		if (attr->rx_threshold >= udma_jfr->wqe_cnt) {
+			dev_err(udma_dev->dev,
+				"JFR rx_threshold(%u) must less than wqe num(%u).\n",
+				attr->rx_threshold, udma_jfr->wqe_cnt);
+			return -EINVAL;
+		}
+		*rx_threshold_flag = true;
+	}
+
+	if (attr->mask & UBCORE_JFR_STATE) {
+		if (udma_jfr->state == attr->state) {
+			dev_info(udma_dev->dev,
+				 "jfr(%u) state has been %s, keep it unchanged.\n",
+				 udma_jfr->rq.id, to_state_str(attr->state));
+			return 0;
+		} else if (!verify_modify_jfr_state(udma_jfr->state,
+						    attr->state)) {
+			dev_err(udma_dev->dev,
+				"jfr(%u) not support modify jfr state from %s to %s.\n",
+				udma_jfr->rq.id, to_state_str(udma_jfr->state),
+				to_state_str(attr->state));
+			return -EINVAL;
+		} else if ((attr->state == UBCORE_JFR_STATE_RESET ||
+			    attr->state == UBCORE_JFR_STATE_ERROR) &&
+			    *rx_threshold_flag) {
+			dev_err(udma_dev->dev,
+				"jfr(%u) not support set rx threshold when change state to %s.\n",
+				udma_jfr->rq.id, to_state_str(attr->state));
+			return -EINVAL;
+		}
+		*state_flag = true;
+	}
+
+	return 0;
+}
+
+static int udma_destroy_hw_jfr_ctx(struct udma_dev *dev, uint32_t jfr_id)
+{
+	struct ubase_mbx_attr attr = {};
+	int ret;
+
+	attr.tag = jfr_id;
+	attr.op = UDMA_CMD_DESTROY_JFR_CONTEXT;
+	ret = post_mailbox_update_ctx(dev, NULL, 0, &attr);
+	if (ret)
+		dev_err(dev->dev,
+			"post mailbox destroy jfr ctx failed, ret = %d.\n", ret);
+
+	return ret;
+}
+
+int udma_modify_jfr(struct ubcore_jfr *jfr, struct ubcore_jfr_attr *attr,
+		    struct ubcore_udata *udata)
+{
+	struct udma_dev *udma_dev = to_udma_dev(jfr->ub_dev);
+	struct udma_jfr *udma_jfr = to_udma_jfr(jfr);
+	bool rx_threshold_flag = false;
+	bool state_flag = false;
+	int ret = 0;
+
+	ret = verify_modify_jfr(udma_dev, udma_jfr, attr, &state_flag,
+				&rx_threshold_flag);
+	if (ret)
+		return ret;
+
+	if (!(rx_threshold_flag || state_flag))
+		return 0;
+
+	if (rx_threshold_flag && !state_flag) {
+		ret = modify_jfr_context(udma_dev, udma_jfr->rq.id, state_flag,
+					 rx_threshold_flag, attr);
+	} else {
+		switch (attr->state) {
+		case UBCORE_JFR_STATE_RESET:
+			ret = udma_destroy_hw_jfr_ctx(udma_dev, udma_jfr->rq.id);
+			break;
+		case UBCORE_JFR_STATE_READY:
+			ret = udma_hw_init_jfrc(udma_dev, &jfr->jfr_cfg, udma_jfr,
+						rx_threshold_flag ?
+						attr->rx_threshold : udma_jfr->rx_threshold);
+			break;
+		default:
+			ret = modify_jfr_context(udma_dev, udma_jfr->rq.id, state_flag,
+						rx_threshold_flag, attr);
+			break;
+		}
+	}
+
+	if (ret)
+		return ret;
+
+	if (state_flag)
+		udma_jfr->state = attr->state;
+
+	if (rx_threshold_flag)
+		udma_jfr->rx_threshold = attr->rx_threshold;
+
+	return 0;
+}
+
+int udma_unimport_jfr(struct ubcore_tjetty *tjfr)
+{
+	struct udma_target_jetty *udma_tjfr = to_udma_tjetty(tjfr);
+
+	udma_tjfr->token_value = 0;
+	tjfr->cfg.token_value.token = 0;
+
+	kfree(udma_tjfr);
+
+	return 0;
+}
+
+static void fill_wqe_idx(struct udma_jfr *jfr, uint32_t wqe_idx)
+{
+	uint32_t *idx_buf;
+
+	idx_buf = (uint32_t *)get_buf_entry(&jfr->idx_que.buf, jfr->rq.pi);
+	*idx_buf = cpu_to_le32(wqe_idx);
+
+	jfr->rq.pi++;
+}
+
+static void fill_recv_sge_to_wqe(struct ubcore_jfr_wr *wr, void *wqe,
+				 uint32_t max_sge)
+{
+	struct udma_wqe_sge *sge = (struct udma_wqe_sge *)wqe;
+	uint32_t i, cnt;
+
+	for (i = 0, cnt = 0; i < wr->src.num_sge; i++) {
+		if (!wr->src.sge[i].len)
+			continue;
+		set_data_of_sge(sge + cnt, wr->src.sge + i);
+		++cnt;
+	}
+
+	if (cnt < max_sge)
+		memset(sge + cnt, 0, (max_sge - cnt) * UDMA_SGE_SIZE);
+}
+
+static int post_recv_one(struct udma_dev *dev, struct udma_jfr *jfr,
+			 struct ubcore_jfr_wr *wr)
+{
+	uint32_t wqe_idx;
+	int ret = 0;
+	void *wqe;
+
+	if (unlikely(wr->src.num_sge > jfr->max_sge)) {
+		dev_err(dev->dev,
+			"failed to check sge, wr_num_sge = %u, max_sge = %u, jfrn = %u.\n",
+			wr->src.num_sge, jfr->max_sge, jfr->rq.id);
+		return -EINVAL;
+	}
+
+	if (udma_jfrwq_overflow(jfr)) {
+		dev_err(dev->dev, "failed to check jfrwq, jfrwq is full, jfrn = %u.\n",
+			jfr->rq.id);
+		return -ENOMEM;
+	}
+
+	ret = udma_id_alloc(dev, &jfr->idx_que.jfr_idx_table.ida_table,
+			    &wqe_idx);
+	if (ret) {
+		dev_err(dev->dev, "failed to get jfr wqe idx.\n");
+		return ret;
+	}
+	wqe = get_buf_entry(&jfr->rq.buf, wqe_idx);
+
+	fill_recv_sge_to_wqe(wr, wqe, jfr->max_sge);
+
+	fill_wqe_idx(jfr, wqe_idx);
+
+	jfr->rq.wrid[wqe_idx] = wr->user_ctx;
+
+	return ret;
+}
+
+/* thanks to drivers/infiniband/hw/bnxt_re/ib_verbs.c */
+int udma_post_jfr_wr(struct ubcore_jfr *ubcore_jfr, struct ubcore_jfr_wr *wr,
+		     struct ubcore_jfr_wr **bad_wr)
+{
+	struct udma_dev *dev = to_udma_dev(ubcore_jfr->ub_dev);
+	struct udma_jfr *jfr = to_udma_jfr(ubcore_jfr);
+	uint32_t nreq;
+	int ret = 0;
+
+	if (!ubcore_jfr->jfr_cfg.flag.bs.lock_free)
+		spin_lock(&jfr->lock);
+
+	for (nreq = 0; wr; ++nreq, wr = wr->next) {
+		ret = post_recv_one(dev, jfr, wr);
+		if (ret) {
+			*bad_wr = wr;
+			break;
+		}
+	}
+
+	if (likely(nreq)) {
+		/*
+		 * Ensure that the pipeline fills all RQEs into the RQ queue,
+		 * then updating the PI pointer.
+		 */
+		wmb();
+		*jfr->sw_db.db_record = jfr->rq.pi &
+					(uint32_t)UDMA_JFR_DB_PI_M;
+	}
+
+	if (!ubcore_jfr->jfr_cfg.flag.bs.lock_free)
+		spin_unlock(&jfr->lock);
+
+	return ret;
+}
+
+struct ubcore_tjetty *udma_import_jfr_ex(struct ubcore_device *dev,
+					 struct ubcore_tjetty_cfg *cfg,
+					 struct ubcore_active_tp_cfg *active_tp_cfg,
+					 struct ubcore_udata *udata)
+{
+	struct udma_target_jetty *udma_tjfr;
+
+	udma_tjfr = kzalloc(sizeof(*udma_tjfr), GFP_KERNEL);
+	if (!udma_tjfr)
+		return NULL;
+
+	if (!udata) {
+		if (cfg->flag.bs.token_policy != UBCORE_TOKEN_NONE) {
+			udma_tjfr->token_value = cfg->token_value.token;
+			udma_tjfr->token_value_valid = true;
+		}
+	}
+
+	udma_swap_endian(cfg->id.eid.raw, udma_tjfr->le_eid.raw, UBCORE_EID_SIZE);
+
+	return &udma_tjfr->ubcore_tjetty;
 }
