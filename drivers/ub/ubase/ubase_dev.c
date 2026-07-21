@@ -12,7 +12,6 @@
 #include "ubase_arq.h"
 #include "ubase_cmd.h"
 #include "ubase_ctrlq.h"
-#include "ubase_err_handle.h"
 #include "ubase_hw.h"
 #include "ubase_mailbox.h"
 #include "ubase_pmem.h"
@@ -320,6 +319,16 @@ static void ubase_update_stats_for_all(struct ubase_dev *udev)
 	}
 }
 
+static void ubase_report_rate_limited_log_cnt(struct ubase_dev *udev)
+{
+	if (udev->log_rs.aeq_event_type_exceed_max_cnt) {
+		ubase_warn(udev,
+			   "rate limited log: aeq_event_type_exceed_max_cnt = %llu.\n",
+			   udev->log_rs.aeq_event_type_exceed_max_cnt);
+		udev->log_rs.aeq_event_type_exceed_max_cnt = 0;
+	}
+}
+
 static void ubase_cancel_period_service_task(struct ubase_dev *udev)
 {
 	if (udev->period_service_task.service_task.work.func)
@@ -342,6 +351,7 @@ static int ubase_enable_period_service_task(struct ubase_dev *udev)
 static void ubase_period_service_task(struct work_struct *work)
 {
 #define UBASE_STATS_TIMER_INTERVAL		(300000 / (UBASE_PERIOD_100MS))
+#define UBASE_RL_LOG_TIMER_INTERVAL		(180000 / (UBASE_PERIOD_100MS))
 #define UBASE_CTRLQ_TIMER_INTERVAL		(3000 / (UBASE_PERIOD_100MS))
 
 	struct ubase_delay_work *ubase_work =
@@ -361,6 +371,10 @@ static void ubase_period_service_task(struct work_struct *work)
 	if (test_bit(UBASE_STATE_INITED_B, &udev->state_bits) &&
 	    !(udev->serv_proc_cnt % UBASE_CTRLQ_TIMER_INTERVAL))
 		ubase_ctrlq_clean_service_task(udev);
+
+	if (test_bit(UBASE_STATE_INITED_B, &udev->state_bits) &&
+	    !(udev->serv_proc_cnt % UBASE_RL_LOG_TIMER_INTERVAL))
+		ubase_report_rate_limited_log_cnt(udev);
 
 	udev->serv_proc_cnt++;
 	ubase_enable_period_service_task(udev);
@@ -525,11 +539,12 @@ static int ubase_handle_ue2ue_ctrlq_req(struct ubase_dev *udev,
 	ue_info.seq = cmd->seq;
 	ue_info.mbx_ue_id = mbx_ue_id;
 
-	ret = __ubase_ctrlq_send(udev, &msg, &ue_info);
+	ret = __ubase_ctrlq_send(udev, &msg, false, &ue_info);
 	if (ret)
 		ubase_err(udev,
-			  "failed to send ue's ctrlq msg, ser_type = 0x%x, opc = 0x%x, ret = %d.\n",
-			  head->service_type, head->opcode, ret);
+			  "failed to send ue's ctrlq msg, ser_type = 0x%x, opc = 0x%x, bus_ue_id = %u, seq = %u, ret = %d.\n",
+			  head->service_type, head->opcode, ue_info.bus_ue_id,
+			  ue_info.seq, ret);
 
 	return ret;
 }
@@ -785,6 +800,10 @@ static const struct ubase_init_function ubase_init_func_map[] = {
 		ubase_hw_init, ubase_hw_uninit
 	},
 	{
+		"init rc buf", UBASE_SUP_UDMA, 1,
+		ubase_rc_buf_init, ubase_rc_buf_uninit
+	},
+	{
 		"init debugfs", UBASE_SUP_ALL, 0,
 		ubase_dbg_init, ubase_dbg_uninit
 	},
@@ -830,6 +849,7 @@ int ubase_dev_init(struct ubase_dev *udev)
 	return 0;
 
 err_init:
+	ubase_ubus_fault_log(udev, UBASE_FAULT_EVENT_ID_PROBE, NULL);
 	for (i -= 1; i >= 0; i--) {
 		if (!ubase_init_func_support(udev,
 					     ubase_init_func_map[i].support_devs))
@@ -951,6 +971,32 @@ void ubase_resume_aux_devices(struct ubase_dev *udev)
 	}
 	mutex_unlock(&priv->uadev_lock);
 }
+
+/**
+ * ubase_adev_fault_log() - trigger black box to dump register values when faults occur
+ * @adev: auxiliary device
+ * @event_id: fault event id (high 8 bits: driver module id, low 24 bits: event type)
+ * @data: optional string pointer to record additional information (can be NULL)
+ *
+ * This function is used as trigger function for the black box mechanism. If faults
+ * occur during the driver's probe or remove process, this function can be called
+ * to dump current values of key registers to the file system for cause analysis.
+ *
+ * Context: Process context. Takes and releases <mutex>.
+ */
+void ubase_adev_fault_log(struct auxiliary_device *adev,
+			  uint32_t event_id, void *data)
+{
+	struct ubase_dev *udev;
+
+	if (!adev)
+		return;
+
+	udev = __ubase_get_udev_by_adev(adev);
+
+	ubase_ubus_fault_log(udev, event_id, data);
+}
+EXPORT_SYMBOL(ubase_adev_fault_log);
 
 /**
  * ubase_adev_ubl_supported() - determine whether ub link is supported

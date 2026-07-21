@@ -229,8 +229,8 @@ static int unic_set_stack_ip(struct net_device *dev,
 
 	skb = alloc_skb(NLMSG_ALIGN(sizeof(*req)), GFP_KERNEL);
 	if (!skb) {
-		unic_info(unic_dev,
-			  "failed to alloc skb, unic stop setting stack ip.\n");
+		unic_err(unic_dev,
+			 "failed to alloc skb, unic stop setting stack ip.\n");
 		return -ENOMEM;
 	}
 
@@ -468,6 +468,9 @@ int unic_handle_notify_ip_event(struct auxiliary_device *adev, u8 service_ver,
 	struct unic_stack_ip_info st_ip;
 	int ret;
 
+	if (!unic_dev_ubl_supported(priv))
+		return -EOPNOTSUPP;
+
 	if (service_ver != UBASE_CTRLQ_SER_VER_01)
 		return -EOPNOTSUPP;
 
@@ -682,6 +685,9 @@ void unic_query_ip_addr(struct auxiliary_device *adev)
 	u16 ip_index = 0, cnt = 0;
 	u8 get_count = 0;
 	int ret;
+
+	if (!unic_dev_ubl_supported(priv))
+		return;
 
 	set_bit(UNIC_VPORT_STATE_IP_QUERYING, &priv->vport.state);
 	INIT_LIST_HEAD(&tmp_list);

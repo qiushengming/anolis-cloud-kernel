@@ -7,6 +7,7 @@
 #ifndef __UBASE_DEV_H__
 #define __UBASE_DEV_H__
 
+#include <linux/atomic.h>
 #include <linux/auxiliary_bus.h>
 #include <linux/dma-mapping.h>
 #include <linux/if_ether.h>
@@ -149,6 +150,7 @@ struct ubase_mbox_cmd {
 	struct dma_pool *pool;
 	struct semaphore sem;
 	struct ubase_mbx_event_context ctx;
+	atomic_t mbx_cnt;
 };
 
 struct ubase_destroy_res_cmd {
@@ -194,7 +196,6 @@ enum ubase_dev_state_bit {
 	UBASE_STATE_RST_HANDLING_B,
 	UBASE_STATE_IRQ_INVALID_B,
 	UBASE_STATE_PORT_RESETTING_B,
-	UBASE_STATE_HIMAC_RESETTING_B,
 	UBASE_STATE_CTX_READY_B,
 	UBASE_STATE_PREALLOC_OK_B,
 	UBASE_STATE_RST_WAIT_DEACTIVE_B,
@@ -290,6 +291,7 @@ struct ubase_ctrlq {
 	struct ubase_ctrlq_crq_table	crq_table;
 	struct ubase_ctrlq_ue_req_table		ue_req_table;
 	struct ubase_ctrlq_ue_resp_table	ue_resp_table;
+	struct semaphore			sem;
 };
 
 #define UBASE_ACT_STAT_MAX_NUM 10U
@@ -353,6 +355,8 @@ struct ubase_prealloc_mem_info {
 struct ubase_log_rs {
 	struct ratelimit_state rs;
 	u16 ctrlq_other_seq_invalid_log_cnt;
+	u64 aeq_event_type_exceed_max_cnt;
+	u32 ctrlq_wait_resp_timeout_cnt;
 };
 
 enum ubase_node_type {

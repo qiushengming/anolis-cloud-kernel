@@ -122,7 +122,7 @@ int unic_set_mac_speed_duplex(struct unic_dev *unic_dev, u32 speed, u8 duplex,
 	ret = ubase_cmd_send_in(unic_dev->comdev.adev, &in);
 	if (ret)
 		dev_err(unic_dev->comdev.adev->dev.parent,
-			"failed to send cmd in config speed(%u), ret = %d.\n",
+			"failed to send cmd in config speed(%uMbps), ret = %d.\n",
 			speed, ret);
 
 	return ret;
@@ -418,6 +418,7 @@ int unic_set_promisc_mode(struct unic_dev *unic_dev,
 
 void unic_fill_promisc_en(struct unic_promisc_en *promisc_en, u8 flags)
 {
+	memset(promisc_en, 0, sizeof(*promisc_en));
 	promisc_en->en_uc_ip = !!(flags & UNIC_UPE);
 	promisc_en->en_mc = !!(flags & UNIC_MPE);
 	promisc_en->en_uc_mac = !!(flags & UNIC_UPE);

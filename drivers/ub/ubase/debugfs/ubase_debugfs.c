@@ -5,6 +5,7 @@
  */
 
 #include <linux/debugfs.h>
+#include <linux/delay.h>
 #include <linux/kernel.h>
 #include <ub/ubase/ubase_comm_debugfs.h>
 
@@ -140,8 +141,8 @@ static void ubase_dbg_dump_adev_caps(struct seq_file *s,
 		{"\ttpg_max_cnt: %u\n", caps->tpg.max_cnt},
 		{"\tcqe_size: %hu\n", caps->cqe_size},
 		{"\tjtg_max_cnt: %u\n", caps->jtg_max_cnt},
-		{"\trc_max_cnt: %u\n", caps->rc_max_cnt},
-		{"\trc_depth: %u\n", caps->rc_que_depth},
+		{"\trc_max_cnt: %u\n", caps->rc.max_cnt},
+		{"\trc_depth: %u\n", caps->rc.depth},
 		{"\tprealloc_mem_dma_len: %llu\n", caps->pmem.dma_len},
 	};
 	int i;
@@ -312,6 +313,8 @@ static void ubase_dbg_fill_single_port(struct seq_file *s,
 	seq_printf(s, "\tport_id: %u\n", stats->port_id);
 	seq_printf(s, "\tport_tx_bw: %u(kbps)\n", le32_to_cpu(stats->tx_port_bw));
 	seq_printf(s, "\tport_rx_bw: %u(kbps)\n", le32_to_cpu(stats->rx_port_bw));
+	seq_printf(s, "\tport_tx_max_bw: %u(kbps)\n", le32_to_cpu(stats->tx_max_port_bw));
+	seq_printf(s, "\tport_rx_max_bw: %u(kbps)\n", le32_to_cpu(stats->rx_max_port_bw));
 	seq_puts(s, "\tvl   tx_bw(kbps)          rx_bw(kbps)\n");
 
 	for (i = 0; i < UBASE_STATS_MAX_VL_NUM; i++) {
@@ -326,7 +329,7 @@ static void ubase_dbg_fill_single_port(struct seq_file *s,
 static int ubase_dbg_dump_perf_stats_ub(struct seq_file *s,
 					struct ubase_dev *udev)
 {
-#define UBASE_UB_PERF_STATS_PERIOD	10
+#define UBASE_UB_PERF_STATS_PERIOD	100
 #define UBASE_QUERY_ALL_BITMAP	0
 
 	struct ubase_perf_stats_result *stats;
@@ -360,13 +363,56 @@ static int ubase_dbg_dump_perf_stats_ub(struct seq_file *s,
 	return 0;
 }
 
+static int ubase_dbg_dump_perf_stats_eth(struct seq_file *s, struct ubase_dev *udev)
+{
+#define UBASE_ETH_PERF_STATS_PERIOD	1000
+
+	struct ubase_eth_mac_stats old_data = {0};
+	struct ubase_eth_mac_stats cur_data = {0};
+	u64 port_tx_bw, port_rx_bw;
+	int ret;
+
+	if (!test_bit(UBASE_STATE_INITED_B, &udev->state_bits) ||
+	     test_bit(UBASE_STATE_RST_HANDLING_B, &udev->state_bits))
+		return -EBUSY;
+
+	ret = __ubase_get_eth_port_stats(udev, &old_data);
+	if (ret) {
+		ubase_err(udev,
+			  "failed to get first eth stats, ret = %d.\n", ret);
+		return ret;
+	}
+
+	msleep(UBASE_ETH_PERF_STATS_PERIOD);
+
+	ret = __ubase_get_eth_port_stats(udev, &cur_data);
+	if (ret) {
+		ubase_err(udev,
+			  "failed to get second eth stats, ret = %d.\n", ret);
+		return ret;
+	}
+
+	port_tx_bw = (cur_data.tx_total_octets - old_data.tx_total_octets) *
+		     BITS_PER_BYTE / UBASE_ETH_PERF_STATS_PERIOD;
+	port_rx_bw = (cur_data.rx_total_octets - old_data.rx_total_octets) *
+		     BITS_PER_BYTE / UBASE_ETH_PERF_STATS_PERIOD;
+
+	seq_printf(s, "perf_stats_period: %d(ms)\n", UBASE_ETH_PERF_STATS_PERIOD);
+	seq_printf(s, "port_tx_bw: %llu(kbps)\n", port_tx_bw);
+	seq_printf(s, "port_rx_bw: %llu(kbps)\n", port_rx_bw);
+
+	return 0;
+}
+
 static int ubase_dbg_dump_perf_stats(struct seq_file *s, void *data)
 {
 	struct ubase_dev *udev = dev_get_drvdata(s->private);
-	int ret = 0;
+	int ret;
 
 	if (ubase_dev_ubl_supported(udev))
 		ret = ubase_dbg_dump_perf_stats_ub(s, udev);
+	else
+		ret = ubase_dbg_dump_perf_stats_eth(s, udev);
 
 	return ret;
 }

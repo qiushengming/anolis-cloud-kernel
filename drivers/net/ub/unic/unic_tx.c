@@ -14,7 +14,7 @@
 #include <linux/udp.h>
 #include <linux/jiffies.h>
 #include <net/ipv6.h>
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 #include <net/ub/ubl.h>
 #endif
 #include <ub/ubase/ubase_comm_mbx.h>
@@ -856,7 +856,7 @@ void unic_destroy_sq(struct unic_dev *unic_dev, u32 num)
 	unic_free_multi_sq_resource(unic_dev, num);
 }
 
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 static int unic_apply_ub_pkt(struct unic_dev *unic_dev, struct unic_sq *sq,
 			     struct sk_buff *skb)
 {
@@ -1019,7 +1019,7 @@ static int unic_set_l4(struct sk_buff *skb, struct unic_sqe_ctrl_section *ctrl,
 		 */
 		if (skb_is_gso(skb)) {
 			unic_err(unic_dev,
-				 "unknown l4 header tso packets hecksum offload.\n");
+				 "unknown l4 header tso packets checksum offload.\n");
 			return -EDOM;
 		}
 		/* the stack computes the IP header already,
@@ -1250,7 +1250,7 @@ netdev_tx_t unic_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 		goto xmit_drop_pkt;
 	}
 
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 	if (unic_apply_ub_pkt(unic_dev, sq, skb))
 		goto xmit_drop_pkt;
 #endif

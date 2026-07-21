@@ -548,8 +548,8 @@ static int unic_set_mac_address(struct net_device *netdev, void *addr)
 		return -EADDRNOTAVAIL;
 	}
 
-	unic_comm_format_mac_addr(format_mac, mac_addr->sa_data);
 	if (ether_addr_equal(netdev->dev_addr, mac_addr->sa_data)) {
+		unic_comm_format_mac_addr(format_mac, mac_addr->sa_data);
 		unic_info(unic_dev, "already using mac(%s).\n", format_mac);
 		return 0;
 	}
@@ -609,11 +609,7 @@ static void unic_set_rx_mode(struct net_device *netdev)
 
 static void unic_tx_timeout(struct net_device *netdev, u32 queue_idx)
 {
-	struct unic_dev *unic_dev = netdev_priv(netdev);
-
 	unic_dump_sq_stats(netdev, queue_idx);
-
-	ubase_reset_event(unic_dev->comdev.adev, UBASE_UE_RESET);
 }
 
 static u8 unic_get_skb_dscp(struct sk_buff *skb)

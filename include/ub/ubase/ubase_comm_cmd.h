@@ -46,6 +46,7 @@ enum ubase_opcode_type {
 	UBASE_OPC_DFX_TP_REG		= 0x0044,
 	UBASE_OPC_DFX_TA_REG		= 0x0045,
 	UBASE_OPC_QUERY_BUS_EID		= 0x0047,
+	UBASE_OPC_DFX_HIMAC_REG		= 0x0048,
 	UBASE_OPC_QUERY_UBCL_CONFIG	= 0x0050,
 
 	/* NL commands */
@@ -62,6 +63,7 @@ enum ubase_opcode_type {
 	UBASE_OPC_ADD_MAC_TBL		= 0x241B,
 	UBASE_OPC_DEL_MAC_TBL		= 0x241C,
 	UBASE_OPC_QUERY_MAC_TBL		= 0x241E,
+	UBASE_OPC_QUERY_MNG_TBL		= 0x241F,
 
 	/* TP commands */
 	UBASE_OPC_TP_TIMER_VA_CONFIG	= 0x3007,
@@ -90,6 +92,7 @@ enum ubase_opcode_type {
 	UBASE_OPC_START_PERF_STATS	= 0x5103,
 	UBASE_OPC_STOP_PERF_STATS	= 0x5104,
 	UBASE_OPC_QUERY_UB_PORT_BITMAP	= 0x5105,
+	UBASE_OPC_QUERY_UB_DL_PKT_STATS	= 0x5106,
 
 	/* PHY commands */
 	UBASE_OPC_CONFIG_SPEED_DUP	= 0x6100,
@@ -136,6 +139,7 @@ struct ubase_cmd_buf {
 	bool	is_read;
 	u32	data_size;
 	void	*data;
+
 	CK_KABI_RESERVE(1)
 	CK_KABI_RESERVE(2)
 	CK_KABI_RESERVE(3)

@@ -12,6 +12,7 @@
 #include "ubase_ctrlq.h"
 #include "ubase_dev.h"
 #include "ubase_mailbox.h"
+#include "ubase_pmem.h"
 #include "ubase_tp.h"
 #include "ubase_hw.h"
 
@@ -104,6 +105,21 @@ static void ubase_check_dev_caps_comm(struct ubase_dev *udev)
 	}
 }
 
+static int ubase_check_dev_caps_rct(struct ubase_dev *udev)
+{
+	if (!ubase_dev_udma_supported(udev))
+		return 0;
+
+	if (!udev->caps.udma_caps.rc.depth) {
+		ubase_err(udev,
+			  "failed to check rct caps: depth = %u.\n",
+			  udev->caps.udma_caps.rc.depth);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int ubase_check_dev_caps_extdb(struct ubase_dev *udev)
 {
 	UBASE_DEFINE_TA_DMA_BUFS(udev);
@@ -122,7 +138,13 @@ static int ubase_check_dev_caps_extdb(struct ubase_dev *udev)
 
 static int ubase_check_dev_caps(struct ubase_dev *udev)
 {
+	int ret;
+
 	ubase_check_dev_caps_comm(udev);
+
+	ret = ubase_check_dev_caps_rct(udev);
+	if (ret)
+		return ret;
 
 	return ubase_check_dev_caps_extdb(udev);
 }
@@ -179,6 +201,8 @@ static void ubase_parse_dev_caps_udma(struct ubase_dev *udev,
 	udma_caps->jtg_max_cnt = le32_to_cpu(resp->jtg_max_cnt);
 	udma_caps->rc_max_cnt = le32_to_cpu(resp->rc_max_cnt_per_vl);
 	udma_caps->rc_que_depth = le32_to_cpu(resp->udma_rc_depth);
+	udma_caps->rc.max_cnt = le32_to_cpu(resp->rc_max_cnt_per_vl);
+	udma_caps->rc.depth = le32_to_cpu(resp->udma_rc_depth);
 }
 
 static void ubase_parse_dev_caps(struct ubase_dev *udev,
@@ -499,7 +523,7 @@ static void ubase_get_ctx_entry_cnt(struct ubase_dev *udev)
 	ubase_ctx_buf->jfr.entry_cnt = unic_caps->jfr.max_cnt;
 	ubase_ctx_buf->jfc.entry_cnt = unic_caps->jfc.max_cnt;
 	ubase_ctx_buf->jtg.entry_cnt = udma_caps->jtg_max_cnt;
-	ubase_ctx_buf->rc.entry_cnt = udma_caps->rc_max_cnt;
+	ubase_ctx_buf->rc.entry_cnt = udma_caps->rc.max_cnt;
 
 	ubase_ctx_buf->jfr.entry_cnt += udma_caps->jfr.max_cnt;
 	ubase_ctx_buf->jfc.entry_cnt += udma_caps->jfc.max_cnt;
@@ -863,7 +887,7 @@ static int ubase_notify_ctrl_plane_init_res(struct ubase_dev *udev)
 
 	req.flag = UBASE_CTRL_PLANE_INIT_RES;
 
-	ret = __ubase_ctrlq_send(udev, &msg, NULL);
+	ret = __ubase_ctrlq_send(udev, &msg, true, NULL);
 	if (ret)
 		dev_err(udev->dev,
 			"failed to notify ctrl plane init res, ret = %d.\n",
@@ -955,27 +979,28 @@ static int ubase_stop_perf_stats(struct ubase_dev *udev,
 int __ubase_perf_stats(struct ubase_dev *udev, u64 port_bitmap, u32 period,
 		       struct ubase_perf_stats_result *data, u32 data_size)
 {
-#define UBASE_MS_TO_US(ms) (1000 * (ms))
+#define UBASE_MS_TO_US(ms)	(1000 * (ms))
+
+	unsigned long logic_port_bitmap = udev->caps.dev_caps.logic_port_bitmap;
 	struct ubase_stop_perf_stats_cmd resp;
-	unsigned long logic_port_bitmap;
-	int ret, j, k, port_num;
+	u32 j, k, port_num;
+	int ret;
 	u8 i;
 
 	if (!test_bit(UBASE_STATE_INITED_B, &udev->state_bits) ||
 	    test_bit(UBASE_STATE_RST_HANDLING_B, &udev->state_bits))
 		return -EBUSY;
 
-	logic_port_bitmap = udev->caps.dev_caps.logic_port_bitmap;
-
 	if (port_bitmap) {
 		if (data_size < bitmap_weight((unsigned long *)&port_bitmap,
 					      UBASE_MAX_PORT_NUM) ||
 		    !bitmap_subset((unsigned long *)&port_bitmap,
-				   &logic_port_bitmap,
-				   UBASE_MAX_PORT_NUM))
+				   &logic_port_bitmap, UBASE_MAX_PORT_NUM))
 			return -EINVAL;
 	} else {
-		if (data_size != UBASE_MAX_PORT_NUM)
+		if (data_size != UBASE_MAX_PORT_NUM ||
+		    data_size < bitmap_weight((unsigned long *)&logic_port_bitmap,
+					      UBASE_MAX_PORT_NUM))
 			return -EINVAL;
 
 		port_bitmap = logic_port_bitmap;
@@ -1001,6 +1026,8 @@ int __ubase_perf_stats(struct ubase_dev *udev, u64 port_bitmap, u32 period,
 
 		data[k].tx_port_bw = le32_to_cpu(resp.tx_port_bw);
 		data[k].rx_port_bw = le32_to_cpu(resp.rx_port_bw);
+		data[k].tx_max_port_bw = le32_to_cpu(resp.tx_max_port_bw);
+		data[k].rx_max_port_bw = le32_to_cpu(resp.rx_max_port_bw);
 		data[k].port_id = i;
 		data[k].valid = 1;
 
@@ -1064,4 +1091,97 @@ void ubase_hw_uninit(struct ubase_dev *udev)
 	}
 
 	ubase_uninit_ctx_buf(udev);
+}
+
+static int ubase_alloc_rc_buf(struct ubase_dev *udev, int rc_que_idx)
+{
+	struct ubase_rc_que_addr *rc_que_addr =
+				 &udev->caps.udma_caps.rc.addrs[rc_que_idx];
+	size_t size = udev->caps.udma_caps.rc.depth * UBASE_RCE_SIZE;
+
+	rc_que_addr->va = dma_alloc_coherent(udev->dev, size,
+					     &rc_que_addr->iova, GFP_KERNEL);
+	if (!rc_que_addr->va)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static void ubase_free_rc_buf(struct ubase_dev *udev, int rc_que_idx)
+{
+	size_t size = udev->caps.udma_caps.rc.depth * UBASE_RCE_SIZE;
+	struct ubase_rc_que_addr *rc_que_addr;
+
+	if (!udev->caps.udma_caps.rc.addrs)
+		return;
+
+	rc_que_addr = &udev->caps.udma_caps.rc.addrs[rc_que_idx];
+
+	if (!rc_que_addr->va)
+		return;
+
+	dma_free_coherent(udev->dev, size, rc_que_addr->va, rc_que_addr->iova);
+
+	rc_que_addr->va = NULL;
+}
+
+int ubase_rc_buf_init(struct ubase_dev *udev)
+{
+	u32 max_cnt = udev->caps.udma_caps.rc.max_cnt;
+	u32 idx;
+	int ret;
+
+	if (test_bit(UBASE_STATE_PREALLOC_OK_B, &udev->state_bits))
+		return 0;
+
+	if (!test_bit(UBASE_STATE_PREALLOC_OK_B, &udev->state_bits)) {
+		udev->caps.udma_caps.rc.addrs = kcalloc(max_cnt,
+							sizeof(struct ubase_rc_que_addr),
+							GFP_KERNEL);
+		if (!udev->caps.udma_caps.rc.addrs) {
+			ret = -ENOMEM;
+			goto err_alloc_rc_addrs;
+		}
+	}
+
+	for (idx = 0; idx < max_cnt; idx++) {
+		ret = ubase_alloc_rc_buf(udev, idx);
+		if (ret) {
+			ubase_err(udev, "failed to init rc buf[%u], ret = %d.\n",
+				  idx, ret);
+			goto err_alloc_rc_buf;
+		}
+	}
+
+	return 0;
+
+err_alloc_rc_buf:
+	for (; idx > 0; idx--)
+		ubase_free_rc_buf(udev, idx - 1);
+
+	if (!test_bit(UBASE_STATE_PREALLOC_OK_B, &udev->state_bits)) {
+		kfree(udev->caps.udma_caps.rc.addrs);
+		udev->caps.udma_caps.rc.addrs = NULL;
+	}
+err_alloc_rc_addrs:
+
+	return ret;
+}
+
+void ubase_rc_buf_uninit(struct ubase_dev *udev)
+{
+	struct ubase_rc_que_addr *addrs = udev->caps.udma_caps.rc.addrs;
+	u32 max_cnt = udev->caps.udma_caps.rc.max_cnt;
+	u32 idx;
+
+	if (test_bit(UBASE_STATE_PREALLOC_OK_B, &udev->state_bits))
+		return;
+
+	for (idx = max_cnt; idx > 0; idx--)
+		ubase_free_rc_buf(udev, idx - 1);
+
+	if (!test_bit(UBASE_STATE_PREALLOC_OK_B, &udev->state_bits)) {
+		kfree(addrs);
+		udev->caps.udma_caps.rc.addrs = NULL;
+	}
 }

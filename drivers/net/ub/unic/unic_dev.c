@@ -9,7 +9,7 @@
 #include <linux/etherdevice.h>
 #include <linux/netdevice.h>
 #include <net/rtnetlink.h>
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 #include <net/ub/ubl.h>
 #endif
 #include <ub/ubase/ubase_comm_cmd.h>
@@ -30,7 +30,7 @@
 #include "unic_vlan.h"
 #include "unic_dev.h"
 
-#define UNIC_WATCHDOG_TIMEOUT (5 * HZ)
+#define UNIC_WATCHDOG_TIMEOUT (30 * HZ)
 
 #ifndef UB_DATA_LEN
 #define UB_DATA_LEN 1500
@@ -627,11 +627,6 @@ static int unic_init_mac(struct unic_dev *unic_dev)
 	if (ret)
 		return ret;
 
-	ret = unic_dev_fec_supported(unic_dev) && mac->user_fec_mode ?
-		unic_set_fec_mode(unic_dev, mac->user_fec_mode) : 0;
-	if (ret)
-		return ret;
-
 	ret = unic_dev_init_mtu(unic_dev);
 	if (ret) {
 		dev_err(unic_dev->comdev.adev->dev.parent,
@@ -805,8 +800,8 @@ static int unic_init_vport_buf(struct unic_dev *unic_dev)
 
 	if (unic_dev->caps.vport_buf_num > UNIC_MAX_VPORT_BUF_NUM) {
 		dev_err(adev->dev.parent,
-			"vport_buf_num exceeded the maximum(%d).\n",
-			UNIC_MAX_VPORT_BUF_NUM);
+			"vport_buf_num(%hhu) exceeded the maximum(%d).\n",
+			unic_dev->caps.vport_buf_num, UNIC_MAX_VPORT_BUF_NUM);
 		return -EINVAL;
 	}
 
@@ -1046,14 +1041,14 @@ static struct net_device *unic_alloc_netdev(struct auxiliary_device *adev)
 		channel_num = UNIC_DEFAULT_CHANNEL_NUM;
 
 	if (ubase_adev_ubl_supported(adev)) {
-#ifdef CONFIG_UB_UNIC_UBL
+#if IS_ENABLED(CONFIG_UB_UNIC_UBL)
 		snprintf(name, IFNAMSIZ, "ublc%ud%ue%u", caps->chip_id,
 			 caps->die_id, caps->ue_id);
 		netdev = alloc_netdev_mq(sizeof(struct unic_dev), name,
 					 NET_NAME_USER, ubl_setup, channel_num);
 #else
 		dev_warn(adev->dev.parent,
-			 "failed to alloc netdev because of ubl macro is not enabled.\n");
+			 "failed to alloc netdev because of CONFIG_UB_UNIC_UBL is not enabled.\n");
 #endif
 	} else {
 		snprintf(name, IFNAMSIZ, "ethc%ud%ue%u", caps->chip_id,
