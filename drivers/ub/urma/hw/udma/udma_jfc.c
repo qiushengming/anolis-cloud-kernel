@@ -120,70 +120,83 @@ static int udma_get_cmd_from_user(struct udma_create_jfc_ucmd *ucmd,
 	return 0;
 }
 
-static int udma_get_jfc_buf(struct udma_dev *dev, struct udma_create_jfc_ucmd *ucmd,
-			    struct ubcore_udata *udata, struct udma_jfc *jfc)
+static int udma_alloc_u_cq(struct udma_dev *dev, struct udma_create_jfc_ucmd *ucmd,
+			   struct udma_jfc *jfc)
 {
-	struct udma_context *uctx;
-	uint32_t size;
-	int ret = 0;
+	int ret;
 
-	if (udata) {
+	if (ucmd->is_hugepage) {
+		jfc->buf.addr = ucmd->buf_addr;
+		if (udma_occupy_u_hugepage(jfc->ctx, (void *)jfc->buf.addr)) {
+			dev_err(dev->dev, "failed to create cq, va not map.\n");
+			return -EINVAL;
+		}
+		jfc->buf.is_hugepage = true;
+	} else {
 		ret = pin_queue_addr(dev, ucmd->buf_addr, ucmd->buf_len, &jfc->buf);
 		if (ret) {
 			dev_err(dev->dev, "failed to pin queue for jfc, ret = %d.\n", ret);
 			return ret;
 		}
-		uctx = to_udma_context(udata->uctx);
-		jfc->tid = uctx->tid;
-		ret = udma_pin_sw_db(uctx, &jfc->db);
-		if (ret) {
-			dev_err(dev->dev, "failed to pin sw db for jfc, ret = %d.\n", ret);
-			unpin_queue_addr(jfc->buf.umem);
-		}
-
-		return ret;
 	}
+	jfc->tid = jfc->ctx->tid;
+
+	ret = udma_pin_sw_db(jfc->ctx, &jfc->db);
+	if (ret) {
+		dev_err(dev->dev, "failed to pin sw db for jfc, ret = %d.\n", ret);
+		goto err_pin_db;
+	}
+
+	return 0;
+err_pin_db:
+	if (ucmd->is_hugepage)
+		udma_return_u_hugepage(jfc->ctx, (void *)jfc->buf.addr);
+	else
+		unpin_queue_addr(jfc->buf.umem);
+
+	return ret;
+}
+
+static int udma_alloc_k_cq(struct udma_dev *dev, struct udma_jfc *jfc)
+{
+	int ret;
 
 	if (!jfc->lock_free)
 		spin_lock_init(&jfc->lock);
+
 	jfc->buf.entry_size = dev->caps.cqe_size;
 	jfc->tid = dev->tid;
-	size = jfc->buf.entry_size * jfc->buf.entry_cnt;
-
-	ret = udma_k_alloc_buf(dev, size, &jfc->buf);
+	ret = udma_k_alloc_buf(dev, &jfc->buf);
 	if (ret) {
-		dev_err(dev->dev, "failed to alloc buffer for jfc.\n");
+		dev_err(dev->dev, "failed to alloc cq buffer, id=%u.\n", jfc->jfcn);
 		return ret;
 	}
 
 	ret = udma_alloc_sw_db(dev, &jfc->db, UDMA_JFC_TYPE_DB);
 	if (ret) {
 		dev_err(dev->dev, "failed to alloc sw db for jfc(%u).\n", jfc->jfcn);
-		udma_k_free_buf(dev, size, &jfc->buf);
-		return -ENOMEM;
+		udma_k_free_buf(dev, &jfc->buf);
 	}
 
 	return ret;
 }
 
-static void udma_free_jfc_buf(struct udma_dev *dev, struct udma_jfc *jfc)
+static void udma_free_cq(struct udma_dev *dev, struct udma_jfc *jfc)
 {
-	struct udma_context *uctx;
-	uint32_t size;
-
-	if (jfc->buf.kva) {
-		size = jfc->buf.entry_size * jfc->buf.entry_cnt;
-		udma_k_free_buf(dev, size, &jfc->buf);
-	} else if (jfc->buf.umem) {
-		uctx = to_udma_context(jfc->base.uctx);
-		unpin_queue_addr(jfc->buf.umem);
+	if (jfc->mode != UDMA_NORMAL_JFC_TYPE) {
+		udma_free_sw_db(dev, &jfc->db);
+		return;
 	}
 
-	if (jfc->db.page) {
-		uctx = to_udma_context(jfc->base.uctx);
-		udma_unpin_sw_db(uctx, &jfc->db);
-	} else if (jfc->db.kpage) {
+	if (jfc->buf.kva) {
+		udma_k_free_buf(dev, &jfc->buf);
 		udma_free_sw_db(dev, &jfc->db);
+	} else {
+		if (jfc->buf.is_hugepage)
+			udma_return_u_hugepage(jfc->ctx, (void *)jfc->buf.addr);
+		else
+			unpin_queue_addr(jfc->buf.umem);
+		udma_unpin_sw_db(jfc->ctx, &jfc->db);
 	}
 }
 
@@ -369,7 +382,7 @@ struct ubcore_jfc *udma_create_jfc(struct ubcore_device *ubcore_dev,
 		goto err_store_jfcn;
 	}
 
-	ret = udma_get_jfc_buf(dev, &ucmd, udata, jfc);
+	ret = udata ? udma_alloc_u_cq(dev, &ucmd, jfc) : udma_alloc_k_cq(dev, jfc);
 	if (ret)
 		goto err_get_jfc_buf;
 
@@ -387,7 +400,7 @@ struct ubcore_jfc *udma_create_jfc(struct ubcore_device *ubcore_dev,
 
 err_alloc_cqc:
 	jfc->base.uctx = (udata == NULL ? NULL : udata->uctx);
-	udma_free_jfc_buf(dev, jfc);
+	udma_free_cq(dev, jfc);
 err_get_jfc_buf:
 	xa_lock_irqsave(&dev->jfc_table.xa, flags_erase);
 	__xa_erase(&dev->jfc_table.xa, jfc->jfcn);
@@ -497,7 +510,7 @@ int udma_destroy_jfc(struct ubcore_jfc *jfc)
 	if (dfx_switch)
 		udma_dfx_delete_id(dev, &dev->dfx_info->jfc, jfc->id);
 
-	udma_free_jfc_buf(dev, ujfc);
+	udma_free_cq(dev, ujfc);
 	udma_id_free(&dev->jfc_table.ida_table, ujfc->jfcn);
 	kfree(ujfc);
 
@@ -515,9 +528,9 @@ int udma_jfc_completion(struct notifier_block *nb, unsigned long jfcn,
 	xa_lock(&udma_dev->jfc_table.xa);
 	udma_jfc = (struct udma_jfc *)xa_load(&udma_dev->jfc_table.xa, jfcn);
 	if (!udma_jfc) {
+		xa_unlock(&udma_dev->jfc_table.xa);
 		dev_warn(udma_dev->dev,
 			 "Completion event for bogus jfcn %lu.\n", jfcn);
-		xa_unlock(&udma_dev->jfc_table.xa);
 		return -EINVAL;
 	}
 
@@ -1021,13 +1034,14 @@ int udma_poll_jfc(struct ubcore_jfc *jfc, int cr_cnt, struct ubcore_cr *cr)
 	struct udma_jfc *udma_jfc = to_udma_jfc(jfc);
 	enum jfc_poll_state err = JFC_OK;
 	struct list_head tid_list;
+	unsigned long flags;
 	uint32_t ci;
 	int npolled;
 
 	INIT_LIST_HEAD(&tid_list);
 
 	if (!jfc->jfc_cfg.flag.bs.lock_free)
-		spin_lock(&udma_jfc->lock);
+		spin_lock_irqsave(&udma_jfc->lock, flags);
 
 	for (npolled = 0; npolled < cr_cnt; ++npolled) {
 		err = udma_poll_one(dev, udma_jfc, cr + npolled, &tid_list);
@@ -1041,7 +1055,7 @@ int udma_poll_jfc(struct ubcore_jfc *jfc, int cr_cnt, struct ubcore_cr *cr)
 	}
 
 	if (!jfc->jfc_cfg.flag.bs.lock_free)
-		spin_unlock(&udma_jfc->lock);
+		spin_unlock_irqrestore(&udma_jfc->lock, flags);
 
 	if (!list_empty(&tid_list))
 		udma_inv_tid(dev, &tid_list);
@@ -1054,6 +1068,7 @@ void udma_clean_jfc(struct ubcore_jfc *jfc, uint32_t jetty_id, struct udma_dev *
 	struct udma_jfc *udma_jfc = to_udma_jfc(jfc);
 	struct udma_jfc_cqe *dest;
 	struct udma_jfc_cqe *cqe;
+	unsigned long flags;
 	struct ubcore_cr cr;
 	uint32_t nfreed = 0;
 	uint32_t local_id;
@@ -1064,7 +1079,7 @@ void udma_clean_jfc(struct ubcore_jfc *jfc, uint32_t jetty_id, struct udma_dev *
 		return;
 
 	if (!jfc->jfc_cfg.flag.bs.lock_free)
-		spin_lock(&udma_jfc->lock);
+		spin_lock_irqsave(&udma_jfc->lock, flags);
 
 	for (pi = udma_jfc->ci; get_next_cqe(udma_jfc, pi) != NULL; ++pi) {
 		if (pi > udma_jfc->ci + udma_jfc->buf.entry_cnt)
@@ -1099,5 +1114,5 @@ void udma_clean_jfc(struct ubcore_jfc *jfc, uint32_t jetty_id, struct udma_dev *
 	}
 
 	if (!jfc->jfc_cfg.flag.bs.lock_free)
-		spin_unlock(&udma_jfc->lock);
+		spin_unlock_irqrestore(&udma_jfc->lock, flags);
 }

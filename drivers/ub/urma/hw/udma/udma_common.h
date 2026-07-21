@@ -46,6 +46,7 @@ struct udma_jetty_queue {
 	uint32_t lock_free; /* Support kernel mode lock-free mode */
 	uint32_t ta_timeout; /* ms */
 	enum ubcore_jetty_state state;
+	struct udma_context *udma_ctx;
 	bool non_pin;
 	struct udma_jetty_grp *jetty_grp;
 	enum udma_jetty_type jetty_type;
@@ -315,8 +316,8 @@ struct udma_tp_ctx {
 
 struct ubcore_umem *udma_umem_get(struct udma_umem_param *param);
 void udma_umem_release(struct ubcore_umem *umem, bool is_kernel);
-void udma_init_udma_table(struct udma_table *table, uint32_t max, uint32_t min);
-void udma_init_udma_table_mutex(struct xarray *table, struct mutex *udma_mutex);
+void udma_init_udma_table(struct udma_table *table, uint32_t max, uint32_t min, bool irq_lock);
+void udma_init_udma_table_mutex(struct xarray *table, struct mutex *udma_mutex, bool irq_lock);
 void udma_destroy_npu_cb_table(struct udma_dev *dev);
 void udma_destroy_udma_table(struct udma_dev *dev, struct udma_table *table,
 			     const char *table_name);
@@ -325,8 +326,10 @@ void udma_dfx_store_id(struct udma_dev *udma_dev, struct udma_dfx_entity *entity
 		       uint32_t id, const char *name);
 void udma_dfx_delete_id(struct udma_dev *udma_dev, struct udma_dfx_entity *entity,
 			uint32_t id);
-int udma_k_alloc_buf(struct udma_dev *udma_dev, size_t memory_size, struct udma_buf *buf);
-void udma_k_free_buf(struct udma_dev *udma_dev, size_t memory_size, struct udma_buf *buf);
+int udma_alloc_normal_buf(struct udma_dev *udma_dev, size_t memory_size, struct udma_buf *buf);
+void udma_free_normal_buf(struct udma_dev *udma_dev, size_t memory_size, struct udma_buf *buf);
+int udma_k_alloc_buf(struct udma_dev *dev, struct udma_buf *buf);
+void udma_k_free_buf(struct udma_dev *dev, struct udma_buf *buf);
 void *udma_alloc_iova(struct udma_dev *udma_dev, size_t memory_size, dma_addr_t *addr);
 void udma_free_iova(struct udma_dev *udma_dev, size_t memory_size, void *kva_or_slot,
 		    dma_addr_t addr);
@@ -368,5 +371,8 @@ int udma_query_ue_idx(struct ubcore_device *ub_dev, struct ubcore_devid *devid,
 void udma_dfx_ctx_print(struct udma_dev *udev, const char *name, uint32_t id, uint32_t len,
 			uint32_t *ctx);
 void udma_swap_endian(uint8_t arr[], uint8_t res[], uint32_t res_size);
+
+void udma_init_hugepage(struct udma_dev *dev);
+void udma_destroy_hugepage(struct udma_dev *dev);
 
 #endif /* __UDMA_COMM_H__ */

@@ -6,9 +6,9 @@
 
 #include <linux/types.h>
 
-#define MAP_COMMAND_MASK 0xff
-#define MAP_INDEX_MASK 0xffffff
-#define MAP_INDEX_SHIFT 8
+#define MAP_COMMAND_MASK 0xf
+#define MAP_INDEX_MASK 0xfffffff
+#define MAP_INDEX_SHIFT 4
 
 #define UDMA_SEGMENT_ACCESS_GUARD (1UL << 5)
 
@@ -74,7 +74,8 @@ struct udma_create_jetty_ucmd {
 	__aligned_u64 jetty_addr;
 	__u32 pi_type : 1;
 	__u32 non_pin : 1;
-	__u32 rsv : 30;
+	__u32 is_hugepage : 1;
+	__u32 rsv : 29;
 	__u32 jetty_type;
 	__aligned_u64 jfr_sleep_buf;
 	__u32 jfs_id;
@@ -86,6 +87,9 @@ struct udma_create_jfc_ucmd {
 	__u32 buf_len;
 	__u32 mode; /* 0: normal, 1: user stars, 2: kernel stars */
 	__aligned_u64 db_addr;
+	__u32 is_hugepage : 1;
+	__u32 rsv : 31;
+	__u32 rsv1;
 };
 
 struct udma_create_ctx_resp {
@@ -93,7 +97,8 @@ struct udma_create_ctx_resp {
 	__u32 dwqe_enable : 1;
 	__u32 reduce_enable : 1;
 	__u32 dump_aux_info : 1;
-	__u32 rsv : 21;
+	__u32 hugepage_enable : 1;
+	__u32 rsv : 20;
 	__u32 ue_id;
 	__u32 chip_id;
 	__u32 die_id;
@@ -107,6 +112,7 @@ struct udma_create_jfr_resp {
 };
 
 enum db_mmap_type {
+	UDMA_MMAP_HUGEPAGE,
 	UDMA_MMAP_JFC_PAGE,
 	UDMA_MMAP_JETTY_DSQE,
 };

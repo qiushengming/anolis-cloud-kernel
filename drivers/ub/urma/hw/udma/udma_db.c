@@ -69,6 +69,7 @@ void udma_unpin_sw_db(struct udma_context *ctx, struct udma_sw_db *db)
 		list_del(&db->page->list);
 		udma_umem_release(db->page->umem, false);
 		kfree(db->page);
+		db->page = NULL;
 	}
 
 	mutex_unlock(&ctx->pgdir_mutex);
@@ -115,7 +116,7 @@ static struct udma_k_sw_db_page *udma_alloc_db_page(struct udma_dev *dev,
 
 	bitmap_fill(page->bitmap, page->num_db);
 
-	ret = udma_k_alloc_buf(dev, PAGE_SIZE, &page->db_buf);
+	ret = udma_alloc_normal_buf(dev, PAGE_SIZE, &page->db_buf);
 	if (ret) {
 		dev_err(dev->dev, "Failed alloc db page buf, ret is %d.\n", ret);
 		goto err_kva;
@@ -165,7 +166,7 @@ void udma_free_sw_db(struct udma_dev *dev, struct udma_sw_db *db)
 	set_bit(db->index, db->kpage->bitmap);
 
 	if (bitmap_full(db->kpage->bitmap, db->kpage->num_db)) {
-		udma_k_free_buf(dev, PAGE_SIZE, &db->kpage->db_buf);
+		udma_free_normal_buf(dev, PAGE_SIZE, &db->kpage->db_buf);
 		bitmap_free(db->kpage->bitmap);
 		list_del(&db->kpage->list);
 		kfree(db->kpage);

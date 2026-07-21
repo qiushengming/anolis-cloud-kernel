@@ -8,12 +8,13 @@
 
 #define UDMA_EID_SIZE		16
 #define UDMA_CNA_SIZE		16
-#define UDMA_PID_MASK		24
+#define UDMA_PID_MASK		0xFFFFFF
 #define UDMA_DEFAULT_PID	1
 #define UDMA_UE_NUM		64
 #define UDMA_MAX_UE_IDX		256
 #define UDMA_MAX_TPID_NUM	5
 
+#define UDMA_CTRLQ_UBMEM_INFO_NUM (96)
 #define UDMA_TPN_CNT_MASK 0x1F
 
 enum udma_ctrlq_cmd_code_type {
@@ -26,6 +27,10 @@ enum udma_ctrlq_cmd_code_type {
 	UDMA_CMD_CTRLQ_SET_TP_ATTR,
 	UDMA_CMD_CTRLQ_GET_TP_ATTR,
 	UDMA_CMD_CTRLQ_MAX
+};
+
+enum udma_ctrlq_ubmem_opcode {
+	UDMA_CTRLQ_QUERY_UBMEM_INFO = 0x1,
 };
 
 enum udma_ctrlq_trans_type {
@@ -46,7 +51,9 @@ struct udma_ctrlq_tpid {
 	uint32_t tpid : 24;
 	uint32_t tpn_cnt : 8;
 	uint32_t tpn_start : 24;
-	uint32_t rsv : 8;
+	uint32_t rsv0 : 4;
+	uint32_t migr : 1;
+	uint32_t rsv1 : 3;
 };
 
 struct udma_ctrlq_tpid_list_rsp {
@@ -151,6 +158,10 @@ struct udma_ue_idx_table {
 	uint8_t ue_idx[UDMA_UE_NUM];
 };
 
+struct udma_ctrlq_ubmem_out_query {
+	uint32_t data[UDMA_CTRLQ_UBMEM_INFO_NUM];
+};
+
 struct udma_ctrlq_tp_attr {
 	uint32_t tp_attr_bitmap;
 	struct ubcore_tp_attr_value tp_attr_value;
@@ -179,6 +190,12 @@ struct udma_dev_resource_ratio {
 	uint32_t index;
 };
 
+int udma_query_pair_dev_count(struct ubcore_device *dev, struct ubcore_ucontext *uctx,
+			      struct ubcore_user_ctl_in *in, struct ubcore_user_ctl_out *out);
+
+int udma_get_dev_resource_ratio(struct ubcore_device *dev, struct ubcore_ucontext *uctx,
+				struct ubcore_user_ctl_in *in, struct ubcore_user_ctl_out *out);
+
 int udma_register_npu_cb(struct ubcore_device *dev, struct ubcore_ucontext *uctx,
 			 struct ubcore_user_ctl_in *in, struct ubcore_user_ctl_out *out);
 
@@ -192,6 +209,10 @@ int udma_get_tp_list(struct ubcore_device *dev, struct ubcore_get_tp_cfg *tpid_c
 
 void udma_ctrlq_destroy_tpid_list(struct udma_dev *dev, struct xarray *ctrlq_tpid_table,
 				  bool is_need_flush);
+int udma_ctrlq_set_active_tp_ex(struct udma_dev *dev,
+				struct ubcore_active_tp_cfg *active_cfg);
+int udma_ctrlq_query_ubmem_info(struct ubcore_device *dev, struct ubcore_ucontext *uctx,
+				struct ubcore_user_ctl_in *in, struct ubcore_user_ctl_out *out);
 
 int udma_set_tp_attr(struct ubcore_device *dev, const uint64_t tp_handle,
 		     const uint8_t tp_attr_cnt, const uint32_t tp_attr_bitmap,

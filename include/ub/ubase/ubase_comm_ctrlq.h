@@ -53,6 +53,7 @@ enum ubase_ctrlq_opc_type_ip {
 
 enum ubase_ctrlq_opc_type_dev_register {
 	UBASE_CTRLQ_OPC_UPDATE_SEID		= 0x02,
+	UBASE_CTRLQ_OPC_UPDATE_UE_SEID_GUID	= 0x03,
 	UBASE_CTRLQ_OPC_NOTIFY_RES_RATIO	= 0x13,
 	UBASE_CTRLQ_OPC_CTRLQ_CTRL		= 0x14,
 	UBASE_CTRLQ_OPC_UE_RESET_CTRL		= 0x15,
@@ -85,6 +86,7 @@ struct ubase_ctrlq_msg {
 	u16	resp_seq; /* must set when the is_resp field is true. */
 	u16	in_size;
 	u16	out_size;
+	u16	timeout; /* 0:use default timeout; otherwise, use the configured timeout*/
 	void	*in;
 	void	*out;
 };
