@@ -8,3 +8,4 @@ obj-$(CONFIG_UB_CDMA) += cdma/
 obj-$(CONFIG_UB_UBDEVSHM) += ubdevshm/
 obj-$(CONFIG_UB_UBMEMPFD) += ubmempfd/
 obj-$(CONFIG_UB_URMA) += urma/
+obj-$(CONFIG_UB_UDMA) += urma/hw/udma/
