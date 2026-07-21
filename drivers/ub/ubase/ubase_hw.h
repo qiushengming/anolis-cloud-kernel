@@ -7,8 +7,9 @@
 #ifndef __UBASE_HW_H__
 #define __UBASE_HW_H__
 
-#include <ub/ubase/ubase_comm_hw.h>
+#include <ub/ubase/ubase_comm_mbx.h>
 
+#include "ubase_dev.h"
 #include "ubase_cmd.h"
 
 #define UBASE_CTX_REMOVE_ALL		(-2)
@@ -185,5 +186,6 @@ int ubase_query_fst_fvt_rqmt(struct ubase_dev *udev,
 int ubase_query_port_bitmap(struct ubase_dev *udev);
 int __ubase_perf_stats(struct ubase_dev *udev, u64 port_bitmap, u32 period,
 		       struct ubase_perf_stats_result *data, u32 data_size);
+void ubase_qos_uninit(struct ubase_dev *udev);
 
 #endif

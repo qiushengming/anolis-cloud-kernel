@@ -39,6 +39,8 @@ enum {
 	UNIC_SUPPORT_MASK_NBITS
 };
 
+#define be32_to_le32(x) cpu_to_le32(be32_to_cpu(x))
+
 #define unic_get_cap_bit(unic_dev, nr) \
 	test_bit(nr, (unsigned long *)((unic_dev)->cap_bits))
 
@@ -55,15 +57,6 @@ enum {
 #define UNIC_MPE				(UNIC_USER_MPE | \
 						 UNIC_OVERFLOW_MGP | \
 						 UNIC_OVERFLOW_MP_MAC)
-
-#define UNIC_SUPPORT_APP_LB		BIT(0)
-#define UNIC_SUPPORT_SERIAL_SERDES_LB	BIT(1)
-#define UNIC_SUPPORT_PARALLEL_SERDES_LB	BIT(2)
-#define UNIC_SUPPORT_EXTERNAL_LB	BIT(3)
-#define UNIC_LB_TEST_FLAGS		(UNIC_SUPPORT_APP_LB | \
-					 UNIC_SUPPORT_SERIAL_SERDES_LB | \
-					 UNIC_SUPPORT_PARALLEL_SERDES_LB | \
-					 UNIC_SUPPORT_EXTERNAL_LB)
 
 #define UNIC_RSS_MAX_VL_NUM		UBASE_NIC_MAX_VL_NUM
 #define UNIC_INVALID_PRIORITY		(0xff)

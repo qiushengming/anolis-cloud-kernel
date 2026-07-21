@@ -37,6 +37,7 @@ enum unic_dev_state {
 	UNIC_STATE_MAC_STATS_UPDATING,
 	UNIC_STATE_CHANNEL_INVALID,
 	UNIC_STATE_DEACTIVATE,
+	UNIC_STATE_SYNC_BOND_PORT,
 };
 
 enum unic_vport_state {
@@ -46,6 +47,7 @@ enum unic_vport_state {
 	UNIC_VPORT_STATE_VLAN_FILTER_CHANGE,
 	UNIC_VPORT_STATE_MAC_TBL_CHANGE,
 	UNIC_VPORT_STATE_IP_QUERYING,
+	UNIC_VPORT_STATE_BOND_IP_CHANGE,
 };
 
 enum unic_channel_state {
@@ -141,8 +143,9 @@ struct unic_vl {
 	u16	queue_count[UBASE_MAX_VL_NUM];
 	u16	queue_offset[UBASE_MAX_VL_NUM];
 	u8	vl_sl[UBASE_MAX_VL_NUM];
-	u64	vl_maxrate[UBASE_MAX_VL_NUM];
+	u64	vl_maxrate[UBASE_MAX_VL_NUM]; /* unit: bps */
 	u16	vl_bitmap;
+	u32	maxrate; /* unit: Mbps */
 	struct	unic_pfc_info	pfc_info;
 };
 
@@ -216,6 +219,9 @@ struct unic_addr_tbl {
 	spinlock_t		tmp_ip_lock; /* protect ip address from controller */
 	struct list_head	tmp_ip_list; /* Store temprary ip table */
 
+	spinlock_t		bond_ip_list_lock; /* protect bond ip address from controller */
+	struct list_head	bond_ip_list; /* Store bond ip table */
+
 	spinlock_t		mac_list_lock; /* protect mac address need to add/detele */
 	struct list_head	uc_mac_list; /* store unicast mac table */
 	struct list_head	mc_mac_list; /* store multicast mac table */
@@ -267,7 +273,6 @@ struct unic_dev {
 	struct ubase_event_nb	ae_nbs[UNIC_AE_LEVEL_NUM];
 	struct unic_stats	stats;
 	u8			netdev_flags;
-	u8			loopback_flags;
 	struct unic_vport	vport;
 	struct unic_vport_buf	vbuf[UNIC_MAX_VPORT_BUF_NUM];
 	unsigned long		serv_processed_cnt;

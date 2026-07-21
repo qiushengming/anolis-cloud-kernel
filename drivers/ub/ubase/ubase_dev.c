@@ -416,13 +416,16 @@ static int ubase_wq_init(struct ubase_dev *udev)
 {
 #define UBASE_ALLOC_WQ(name)	alloc_workqueue("%s", WQ_UNBOUND, 0, name)
 
+	struct ub_entity *ue = to_ub_entity(udev->dev);
+
 	udev->ubase_wq = UBASE_ALLOC_WQ("ubase");
 	if (!udev->ubase_wq) {
 		ubase_err(udev, "failed to alloc ubase workqueue.\n");
 		goto err_alloc_ubase_wq;
 	}
 
-	udev->ubase_ctrlq_wq = UBASE_ALLOC_WQ("ubase_ctrlq_service");
+	udev->ubase_ctrlq_wq = alloc_ordered_workqueue("ubase_ctrlq_service_%u",
+						       0, ue->eid);
 	if (!udev->ubase_ctrlq_wq) {
 		ubase_err(udev, "failed to alloc ubase ctrlq workqueue.\n");
 		goto err_alloc_ubase_ctrlq_wq;
@@ -487,7 +490,7 @@ static int ubase_handle_ue2ue_ctrlq_req(struct ubase_dev *udev,
 	u16 mbx_ue_id = le16_to_cpu(cmd->head.mbx_ue_id);
 	struct ubase_ctrlq_ue_info ue_info;
 	struct ubase_ctrlq_msg msg = {0};
-	int ret;
+	int ret = 0, async;
 
 	if (!ubase_mbx_ue_id_is_valid(mbx_ue_id, udev)) {
 		ubase_err(udev, "ubase ue2ue ctrlq req mbx ue id = %u error.\n",
@@ -499,6 +502,10 @@ static int ubase_handle_ue2ue_ctrlq_req(struct ubase_dev *udev,
 		ubase_err(udev, "ubase ue2ue cmd len = %u error.\n", cmd->in_size);
 		return -EINVAL;
 	}
+
+	async = ubase_ctrlq_ue_req_event_callback(udev, cmd);
+	if (async)
+		return 0;
 
 	msg.service_ver = head->service_ver;
 	msg.service_type = head->service_type;
@@ -559,7 +566,10 @@ struct ubase_ue2ue_event_handler {
 	u16 sub_cmd;
 	int (*event_handler)(struct ubase_dev *udev, void *data, u32 len);
 } ubase_ue2ue_events[] = {
-	{ UBASE_UE2UE_CTRLQ_MSG, ubase_handle_ue2ue_ctrlq_event },
+	{
+		.sub_cmd = UBASE_UE2UE_CTRLQ_MSG,
+		.event_handler = ubase_handle_ue2ue_ctrlq_event,
+	},
 };
 
 static int ubase_handle_ue2ue_event(void *dev, void *data, u32 len)
@@ -687,8 +697,8 @@ static int ubase_notify_drv_capbilities(struct ubase_dev *udev)
 
 static int ubase_log_rs_init(struct ubase_dev *udev)
 {
-#define UBASE_RATELIMIT_INTERVAL (2 * HZ)
-#define UBASE_RATELIMIT_BURST 40
+#define UBASE_RATELIMIT_INTERVAL (1 * HZ)
+#define UBASE_RATELIMIT_BURST 5
 
 	raw_spin_lock_init(&udev->log_rs.rs.lock);
 	udev->log_rs.rs.interval = UBASE_RATELIMIT_INTERVAL;
@@ -759,8 +769,8 @@ static const struct ubase_init_function ubase_init_func_map[] = {
 		NULL, NULL
 	},
 	{
-		"init qos", UBASE_SUP_ALL, 0,
-		ubase_qos_init, NULL
+		"init qos", UBASE_SUP_NO_PMU, 0,
+		ubase_qos_init, ubase_qos_uninit
 	},
 	{
 		"prealloc memory", UBASE_SUP_UDMA, 1,
@@ -1414,7 +1424,7 @@ struct ubase_adev_qos *ubase_get_adev_qos(struct auxiliary_device *adev)
 		return NULL;
 
 	udev = __ubase_get_udev_by_adev(adev);
-	return &udev->qos;
+	return &udev->qos.adev_qos;
 }
 EXPORT_SYMBOL(ubase_get_adev_qos);
 
@@ -1636,6 +1646,7 @@ int ubase_deactivate_handler(struct ubase_dev *udev, u32 bus_ue_id)
 void ubase_flush_workqueue(struct ubase_dev *udev)
 {
 	flush_workqueue(udev->ubase_wq);
+	flush_workqueue(udev->ubase_ctrlq_wq);
 	flush_workqueue(udev->ubase_async_wq);
 	flush_workqueue(udev->ubase_period_wq);
 	flush_workqueue(udev->ubase_arq_wq);
@@ -1717,6 +1728,23 @@ static int ubase_deactivate_wait_reset_done(struct ubase_dev *udev)
 	}
 
 	return 0;
+}
+
+void __ubase_deactivate_dev(struct ubase_dev *udev)
+{
+	struct ub_entity *ue = container_of(udev->dev, struct ub_entity, dev);
+	int ret;
+
+	if (!ubase_dev_urma_supported(udev))
+		return;
+
+	if (ubase_activate_proxy_supported(udev))
+		ret = ub_deactivate_entity(ue, ue->entity_idx);
+	else
+		ret = ubase_deactivate_handler(udev, ue->entity_idx);
+
+	if (ret)
+		ubase_warn(udev, "failed to deactivate udev, ret = %d.\n", ret);
 }
 
 /**

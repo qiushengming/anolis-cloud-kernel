@@ -841,6 +841,7 @@ void unic_destroy_sq(struct unic_dev *unic_dev, u32 num)
 {
 	struct auxiliary_device *adev = unic_dev->comdev.adev;
 	struct ubase_adev_caps *unic_caps = ubase_get_unic_caps(adev);
+	enum ubase_reset_stage reset_stage;
 	u32 jfs_start_idx;
 
 	if (!num || !unic_caps)
@@ -848,7 +849,8 @@ void unic_destroy_sq(struct unic_dev *unic_dev, u32 num)
 
 	jfs_start_idx = unic_caps->jfs.start_idx;
 
-	if (!__unic_resetting(unic_dev))
+	reset_stage = ubase_get_reset_stage(adev);
+	if (reset_stage != UBASE_RESET_STAGE_UNINIT)
 		unic_destroy_multi_jfs(unic_dev, num, jfs_start_idx);
 
 	unic_free_multi_sq_resource(unic_dev, num);
@@ -923,8 +925,6 @@ static void unic_fill_ctrl_owner(struct unic_sq *sq,
 static void unic_fill_ctrl_l3_info(struct unic_sqe_ctrl_section *ctrl,
 				   struct sk_buff *skb, struct unic_sq *sq)
 {
-#define be32_to_le32(x) cpu_to_le32(be32_to_cpu(x))
-
 	struct ipv6hdr *ip6_hdr;
 
 	if (skb->protocol == htons(ETH_P_IP)) {
