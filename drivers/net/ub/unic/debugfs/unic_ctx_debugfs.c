@@ -31,7 +31,7 @@ static void unic_dump_jfs_ctx_info_sw(struct unic_sq *sq, struct seq_file *s,
 
 static inline void unic_jfr_ctx_titles_print(struct seq_file *s)
 {
-	seq_puts(s, "RQ_ID  STATE  RQE_SHIFT  RX_JFCN  PI     CI");
+	seq_puts(s, "RQ_ID  STATE  RQE_SHIFT  RX_JFCN  PI     CI     ");
 	seq_puts(s, "RECORD_DB_EN\n");
 }
 
@@ -54,7 +54,7 @@ static void unic_dump_jfr_ctx_info_sw(struct unic_rq *rq, struct seq_file *s,
 
 static inline void unic_jfc_ctx_titles_print(struct seq_file *s)
 {
-	seq_puts(s, "CQ_ID  ARM_ST  STATE  INLINE_EN  SHIFT  CQE_COAL_CNT");
+	seq_puts(s, "CQ_ID  ARM_ST  STATE  INLINE_EN  SHIFT  CQE_COAL_CNT  ");
 	seq_puts(s, "CEQN  RECORD_DB_EN  CQE_COAL_PEIRIOD\n");
 }
 
@@ -194,7 +194,8 @@ static int unic_dbg_dump_ctx_sw(struct seq_file *s, void *data,
 {
 	struct unic_dbg_context {
 		void (*print_ctx_titles)(struct seq_file *s);
-		void (*get_ctx)(struct unic_channels *channels, struct seq_file *s, u32 index);
+		void (*get_ctx)(struct unic_channels *channels,
+				struct seq_file *s, u32 index);
 	} dbg_ctx[] = {
 		{
 			.print_ctx_titles = unic_jfs_ctx_titles_print,
@@ -267,7 +268,8 @@ int unic_dbg_dump_sq_rq_cq_info(struct seq_file *s, void *data)
 {
 	struct unic_dbg_context {
 		void (*print_titles)(struct seq_file *s);
-		void (*get_info)(struct unic_dev *priv, struct seq_file *s, u32 index);
+		void (*get_info)(struct unic_dev *priv, struct seq_file *s,
+				 u32 index);
 	} dbg_ctx[] = {
 		{
 			.print_titles = unic_jfs_sq_info_print,

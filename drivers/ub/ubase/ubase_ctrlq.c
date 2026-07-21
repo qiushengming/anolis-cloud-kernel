@@ -137,9 +137,9 @@ static void ubase_ctrlq_table_uninit(struct ubase_dev *udev)
 	ubase_ctrlq_free_crq_tbl_mem(udev);
 }
 
-static inline u16 ubase_ctrlq_msg_queue_depth(struct ubase_dev *udev)
+static inline u32 ubase_ctrlq_msg_queue_depth(struct ubase_dev *udev)
 {
-	return udev->ctrlq.csq.depth << 1;
+	return (u32)udev->ctrlq.csq.depth << 1;
 }
 
 static inline u16 ubase_ctrlq_max_seq(struct ubase_dev *udev)
@@ -150,11 +150,11 @@ static inline u16 ubase_ctrlq_max_seq(struct ubase_dev *udev)
 static int ubase_ctrlq_msg_queue_init(struct ubase_dev *udev)
 {
 	u16 msg_ctx_size = sizeof(struct ubase_ctrlq_msg_ctx);
-	u16 depth = ubase_ctrlq_msg_queue_depth(udev);
+	u32 depth = ubase_ctrlq_msg_queue_depth(udev);
 	struct ubase_ctrlq_msg_ctx *ctx;
-	u16 i;
+	u32 i;
 
-	udev->ctrlq.msg_queue = kzalloc(depth * msg_ctx_size, GFP_KERNEL);
+	udev->ctrlq.msg_queue = kcalloc(depth, msg_ctx_size, GFP_KERNEL);
 	if (!udev->ctrlq.msg_queue) {
 		ubase_err(udev, "failed to alloc ctrlq msg queue.\n");
 		return -ENOMEM;
@@ -368,9 +368,9 @@ err_msg_queue_init:
 static void ubase_ctrlq_clean_msg_queue(struct ubase_dev *udev)
 {
 	struct ubase_ctrlq_ring *csq = &udev->ctrlq.csq;
-	u16 depth = ubase_ctrlq_msg_queue_depth(udev);
+	u32 depth = ubase_ctrlq_msg_queue_depth(udev);
 	struct ubase_ctrlq_msg_ctx *ctx;
-	u16 i;
+	u32 i;
 
 	spin_lock_bh(&csq->lock);
 	for (i = 0; i < depth; i++) {
@@ -412,9 +412,9 @@ static void ubase_ctrlq_clean_pending_msgs(struct ubase_dev *udev)
 #define UBASE_CTRLQ_CLEAN_WAIT_TIME	5
 
 	struct ubase_ctrlq_ring *csq = &udev->ctrlq.csq;
-	u16 depth = ubase_ctrlq_msg_queue_depth(udev);
+	u32 depth = ubase_ctrlq_msg_queue_depth(udev);
 	struct ubase_ctrlq_msg_ctx *ctx;
-	u16 i;
+	u32 i;
 
 	spin_lock_bh(&csq->lock);
 	for (i = 1; i < depth; i++) {
@@ -648,7 +648,7 @@ static int ubase_ctrlq_wait_completed(struct ubase_dev *udev, u16 seq,
 #define UBASE_CTRLQ_TIMEOUT_CASE_SHUT_DOWN 500
 
 	struct ubase_ctrlq_ring *csq = &udev->ctrlq.csq;
-	u16 depth = ubase_ctrlq_msg_queue_depth(udev);
+	u32 depth = ubase_ctrlq_msg_queue_depth(udev);
 	struct ubase_ctrlq_msg_ctx *ctx;
 	u32 timeout;
 	int ret;
@@ -679,7 +679,7 @@ static int ubase_ctrlq_wait_completed(struct ubase_dev *udev, u16 seq,
 static int ubase_ctrlq_alloc_seq(struct ubase_dev *udev, u16 *seq)
 {
 	struct ubase_ctrlq_msg_ctx *ctx = udev->ctrlq.msg_queue;
-	u16 depth = ubase_ctrlq_msg_queue_depth(udev);
+	u32 depth = ubase_ctrlq_msg_queue_depth(udev);
 	u16 max_seq = ubase_ctrlq_max_seq(udev);
 	u16 next_seq = udev->ctrlq.csq_next_seq;
 	u32 i, loop = 0;
@@ -707,7 +707,7 @@ success:
 static void ubase_ctrlq_free_seq(struct ubase_dev *udev, u16 seq)
 {
 	struct ubase_ctrlq_ring *csq = &udev->ctrlq.csq;
-	u16 depth = ubase_ctrlq_msg_queue_depth(udev);
+	u32 depth = ubase_ctrlq_msg_queue_depth(udev);
 	struct ubase_ctrlq_msg_ctx *ctx;
 
 	spin_lock_bh(&csq->lock);
@@ -720,7 +720,7 @@ static void ubase_ctrlq_addto_msg_queue(struct ubase_dev *udev, u16 seq,
 					struct ubase_ctrlq_msg *msg,
 					struct ubase_ctrlq_ue_info *ue_info)
 {
-	u16 depth = ubase_ctrlq_msg_queue_depth(udev);
+	u32 depth = ubase_ctrlq_msg_queue_depth(udev);
 	struct ubase_ctrlq_msg_ctx *ctx;
 
 	if (!(ubase_ctrlq_msg_is_sync_req(msg) ||
@@ -938,6 +938,13 @@ static bool ubase_ctrlq_crq_is_empty(struct ubase_dev *udev, struct ubase_hw *hw
 {
 	udev->ctrlq.crq.pi = ubase_read_dev(hw, UBASE_CTRLQ_CRQ_TAIL_REG);
 
+	if (unlikely(udev->ctrlq.crq.pi >= udev->ctrlq.crq.depth)) {
+		ubase_err_rl(udev, udev->log_rs.ctrlq_pi_invalid_cnt,
+			     "ctrlq crq pi exceeds depth, pi=%hu, depth=%hu.\n",
+			     udev->ctrlq.crq.pi, udev->ctrlq.crq.depth);
+		return true;
+	}
+
 	return udev->ctrlq.crq.pi == udev->ctrlq.crq.ci;
 }
 
@@ -1051,7 +1058,7 @@ static void ubase_ctrlq_notify_completed(struct ubase_dev *udev,
 					 struct ubase_ctrlq_base_block *head,
 					 u16 seq, void *msg, u16 msg_len)
 {
-	u16 depth = ubase_ctrlq_msg_queue_depth(udev);
+	u32 depth = ubase_ctrlq_msg_queue_depth(udev);
 	struct ubase_ctrlq_msg_ctx *ctx;
 
 	ctx = &udev->ctrlq.msg_queue[seq % depth];
@@ -1127,7 +1134,7 @@ void ubase_ctrlq_handle_crq_msg(struct ubase_dev *udev,
 {
 	bool is_pushed = !!(seq & UBASE_CTRLQ_SEQ_MASK);
 	struct ubase_ctrlq_ring *csq = &udev->ctrlq.csq;
-	u16 depth = ubase_ctrlq_msg_queue_depth(udev);
+	u32 depth = ubase_ctrlq_msg_queue_depth(udev);
 	struct ubase_ctrlq_msg_ctx *ctx;
 
 	if (!is_pushed) {
@@ -1185,7 +1192,7 @@ static void ubase_ctrlq_handle_other_msg(struct ubase_dev *udev,
 	u16 resp_len, seq = le16_to_cpu(head->seq);
 	bool is_pushed = !!(seq & UBASE_CTRLQ_SEQ_MASK);
 	struct ubase_ctrlq_ring *csq = &udev->ctrlq.csq;
-	u16 depth = ubase_ctrlq_msg_queue_depth(udev);
+	u32 depth = ubase_ctrlq_msg_queue_depth(udev);
 	struct ubase_ue2ue_ctrlq_head *ue2ue_head;
 	struct ubase_ctrlq_msg_ctx ctx = {0};
 	struct ubase_cmd_buf in;
@@ -1245,9 +1252,28 @@ static inline void ubase_ctrlq_reset_crq_ci(struct ubase_dev *udev)
 {
 	struct ubase_ctrlq_ring *crq = &udev->ctrlq.crq;
 
-	crq->pi = ubase_read_dev(&udev->hw, UBASE_CTRLQ_CRQ_TAIL_REG);
 	crq->ci = crq->pi;
 	ubase_write_dev(&udev->hw, UBASE_CTRLQ_CRQ_HEAD_REG, crq->ci);
+}
+
+static bool ubase_ctrlq_check_bb_num(struct ubase_dev *udev, u8 bb_num)
+{
+	struct ubase_ctrlq_ring *crq = &udev->ctrlq.crq;
+	u32 remain_bb_num = crq->pi >= crq->ci ? crq->pi - crq->ci :
+			    (u32)crq->pi + crq->depth - crq->ci;
+
+	if (unlikely(!bb_num || bb_num > UBASE_CTRLQ_MAX_BB)) {
+		ubase_err(udev, "ctrlq crq bb_num(%u) is invalid.\n", bb_num);
+		return false;
+	}
+
+	if (unlikely(bb_num > remain_bb_num)) {
+		ubase_err(udev, "ctrlq crq bb_num(%u) more than the remain_bb_num(%u).\n",
+			  bb_num, remain_bb_num);
+		return false;
+	}
+
+	return true;
 }
 
 static void ubase_ctrlq_crq_handler(struct ubase_dev *udev)
@@ -1274,9 +1300,7 @@ static void ubase_ctrlq_crq_handler(struct ubase_dev *udev)
 		seq = le16_to_cpu(head.seq);
 		bb_num = head.bb_num;
 
-		if (unlikely(!bb_num || bb_num > UBASE_CTRLQ_MAX_BB)) {
-			ubase_err(udev, "ctrlq crq bb_num(%u) is invalid.\n",
-				  bb_num);
+		if (!ubase_ctrlq_check_bb_num(udev, bb_num)) {
 			ubase_ctrlq_reset_crq_ci(udev);
 			return;
 		}
@@ -1335,7 +1359,7 @@ void ubase_ctrlq_crq_service_task(struct ubase_delay_work *ubase_work)
 
 void ubase_ctrlq_clean_service_task(struct ubase_dev *udev)
 {
-	u16 i, depth = ubase_ctrlq_msg_queue_depth(udev);
+	u32 i, depth = ubase_ctrlq_msg_queue_depth(udev);
 	struct ubase_ctrlq_ring *csq = &udev->ctrlq.csq;
 	struct ubase_ctrlq_msg_ctx *ctx;
 
@@ -1715,14 +1739,14 @@ int ubase_ctrlq_send_ue_req(struct auxiliary_device *adev, void *data, u16 len)
 	udev = __ubase_get_udev_by_adev(adev);
 	if (len < UBASE_CTRLQ_UE_MSG_HDR_LEN) {
 		ubase_err(udev,
-			  "ubase ctrlq send ue req len invalid, len = %u.\n",
+			  "ubase ctrlq send ue req len invalid, len = %hu.\n",
 			  len);
 		return -EINVAL;
 	}
 
 	if (cmd->in_size > (len - UBASE_CTRLQ_UE_MSG_HDR_LEN)) {
 		ubase_err(udev,
-			  "ubase ctrlq send ue req len error, len = %u, size = %u.\n",
+			  "ubase ctrlq send ue req len error, len = %hu, size = %hu.\n",
 			  len, cmd->in_size);
 		return -EINVAL;
 	}
@@ -1730,7 +1754,7 @@ int ubase_ctrlq_send_ue_req(struct auxiliary_device *adev, void *data, u16 len)
 	mbx_ue_id = le16_to_cpu(cmd->head.mbx_ue_id);
 	if (!ubase_mbx_ue_id_is_valid(mbx_ue_id, udev)) {
 		ubase_err(udev,
-			  "ubase ctrlq send ue req mbx ue id = %u error.\n",
+			  "ubase ctrlq send ue req mbx ue id = %hu error.\n",
 			  mbx_ue_id);
 		return -EINVAL;
 	}
