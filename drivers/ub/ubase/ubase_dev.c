@@ -802,10 +802,6 @@ static const struct ubase_init_function ubase_init_func_map[] = {
 		ubase_hw_init, ubase_hw_uninit
 	},
 	{
-		"init rc buf", UBASE_SUP_UDMA, 1,
-		ubase_rc_buf_init, ubase_rc_buf_uninit
-	},
-	{
 		"init debugfs", UBASE_SUP_ALL, 0,
 		ubase_dbg_init, ubase_dbg_uninit
 	},
@@ -973,6 +969,50 @@ void ubase_resume_aux_devices(struct ubase_dev *udev)
 	}
 	mutex_unlock(&priv->uadev_lock);
 }
+
+/**
+ * ubase_get_hw_ver() - obtaining the current hardware version.
+ * @adev: auxiliary device
+ *
+ * This function is used by the auxiliary device driver module to query
+ * the hardware version information from ubase.
+ *
+ * Context: Any context.
+ * Return: Hardware code. For details, see the definition in ubase_comm_dev.h.
+ */
+u32 ubase_get_hw_ver(struct auxiliary_device *adev)
+{
+	struct ubase_dev *udev;
+	struct ub_entity *ue;
+
+	if (!adev)
+		return UBASE_HW_VER_UNKNOWN;
+
+	udev = __ubase_get_udev_by_adev(adev);
+	ue = container_of(udev->dev, struct ub_entity, dev);
+
+	switch (uent_device(ue)) {
+	case UBASE_DEV_ID_K_0_URMA_MUE:
+	case UBASE_DEV_ID_K_0_URMA_UE:
+	case UBASE_DEV_ID_K_0_CDMA_MUE:
+	case UBASE_DEV_ID_K_0_CDMA_UE:
+	case UBASE_DEV_ID_K_0_PMU_MUE:
+	case UBASE_DEV_ID_K_0_PMU_UE:
+		return UBASE_HW_VER_K_0;
+	case UBASE_DEV_ID_A_0_URMA_MUE:
+	case UBASE_DEV_ID_A_0_URMA_UE:
+	case UBASE_DEV_ID_A_0_CDMA_MUE:
+	case UBASE_DEV_ID_A_0_CDMA_UE:
+	case UBASE_DEV_ID_A_0_PMU_MUE:
+	case UBASE_DEV_ID_A_0_PMU_UE:
+	case UBASE_DEV_ID_A_0_UBOE_MUE:
+	case UBASE_DEV_ID_A_0_UBOE_UE:
+		return UBASE_HW_VER_A_0;
+	default:
+		return UBASE_HW_VER_UNKNOWN;
+	}
+}
+EXPORT_SYMBOL(ubase_get_hw_ver);
 
 /**
  * ubase_adev_fault_log() - trigger black box to dump register values when faults occur
