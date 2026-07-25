@@ -9,11 +9,222 @@
 #include <linux/ummu_core.h>
 
 #include "ubase_cmd.h"
+#include "ubase_hw.h"
+#include "ubase_proxy.h"
+#include "ubase_trace.h"
+#include "ubase_usc.h"
 #include "ubase_mailbox.h"
+
+static int ubase_mbox_over_cmdq_init(struct ubase_dev *udev)
+{
+	struct ubase_mbox_over_cmdq_info *info;
+
+	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	if (!info)
+		return -ENOMEM;
+
+	xa_init(&info->seq_tbl);
+	init_waitqueue_head(&info->queue);
+	udev->moc_info = info;
+	udev->moc_info->seq_num = 0;
+
+	return 0;
+}
+
+static void ubase_mbox_over_cmdq_uninit(struct ubase_dev *udev)
+{
+	struct ubase_mbox_over_cmdq_info *info = udev->moc_info;
+	struct ubase_mbox_over_cmdq_completion *completion;
+	unsigned long idx;
+
+	if (!xa_empty(&info->seq_tbl)) {
+		xa_for_each(&info->seq_tbl, idx, completion)
+			xa_erase(&info->seq_tbl, idx);
+	}
+	xa_destroy(&info->seq_tbl);
+
+	kfree(info);
+}
+
+static u32 ubase_get_seq_for_cmdq(struct ubase_dev *udev)
+{
+#define MAX_SEQ_NUM 1024
+
+	u32 seq;
+
+	seq = ++udev->moc_info->seq_num;
+	if (udev->moc_info->seq_num >= MAX_SEQ_NUM)
+		udev->moc_info->seq_num = 0;
+
+	return seq;
+}
+
+static u16 ubase_get_trans_len_by_opc(u16 opc)
+{
+	switch (opc) {
+	case UBASE_MB_CREATE_AEQ_CONTEXT:
+	case UBASE_MB_CREATE_CEQ_CONTEXT:
+		return sizeof(struct ubase_eq_ctx);
+	case UBASE_MB_QUERY_AEQ_CONTEXT:
+	case UBASE_MB_QUERY_CEQ_CONTEXT:
+	case UBASE_MB_DESTROY_AEQ_CONTEXT:
+	case UBASE_MB_DESTROY_CEQ_CONTEXT:
+		return 0;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
+static u16 ubase_get_resp_len_by_opc(u16 opc)
+{
+	switch (opc) {
+	case UBASE_MB_CREATE_AEQ_CONTEXT:
+	case UBASE_MB_CREATE_CEQ_CONTEXT:
+	case UBASE_MB_DESTROY_AEQ_CONTEXT:
+	case UBASE_MB_DESTROY_CEQ_CONTEXT:
+		return 0;
+	case UBASE_MB_QUERY_AEQ_CONTEXT:
+	case UBASE_MB_QUERY_CEQ_CONTEXT:
+		return sizeof(struct ubase_eq_ctx);
+	default:
+		break;
+	}
+
+	return 0;
+}
+
+static int ubase_wait_resp_from_proxy(struct ubase_dev *udev,
+				      struct ubase_proxy_req_msg *req,
+				      struct ubase_cmd_mailbox *mbox)
+{
+#define UBASE_WAIT_RESP_TIME 1000
+
+	struct ubase_mbox_over_cmdq_info *info = udev->moc_info;
+	struct ubase_mbox_over_cmdq_completion completion;
+	int ret;
+
+	completion.mbox = mbox;
+	completion.mbox_resp_len = ubase_get_resp_len_by_opc(req->opcode);
+	completion.get_resp = false;
+	completion.ret = -ETIME;
+
+	xa_lock(&info->seq_tbl);
+	ret = xa_err(__xa_store(&info->seq_tbl, req->seq_num, &completion,
+				GFP_KERNEL));
+	xa_unlock(&info->seq_tbl);
+	if (ret) {
+		ubase_err(udev, "failed to save eq(%u) proxy resp completion, ret = %d.\n",
+			  req->seq_num, ret);
+		return -EFAULT;
+	}
+
+	ret = wait_event_timeout(info->queue, completion.get_resp,
+				 msecs_to_jiffies(UBASE_WAIT_RESP_TIME));
+	if (!ret && !completion.get_resp)
+		ubase_err(udev, "wait eq(%u) proxy resp timeout.\n",
+			  req->seq_num);
+
+	xa_erase(&info->seq_tbl, req->seq_num);
+	return completion.ret;
+}
+
+int ubase_hw_upgrade_ctx_over_cmdq(struct ubase_dev *udev,
+				   struct ubase_mbx_attr *attr,
+				   struct ubase_cmd_mailbox *mailbox)
+{
+	struct ubase_proxy_req_msg *req;
+	struct ubase_cmd_buf in;
+	ssize_t data_len;
+	int ret;
+
+	data_len = ubase_get_trans_len_by_opc(attr->op);
+	req = kzalloc(sizeof(*req) + data_len, GFP_KERNEL);
+	if (!req) {
+		ubase_err(udev, "failed to alloc mbox over cmdq req msg.\n");
+		return -ENOMEM;
+	}
+
+	req->module = UBASE_MODULE_UBASE_TO_PROXY;
+	req->opcode = attr->op;
+	req->tag = attr->tag;
+	req->seq_num = ubase_get_seq_for_cmdq(udev);
+	req->data_len = data_len;
+	if (req->data_len)
+		memcpy(req->data, mailbox->buf, req->data_len);
+
+	__ubase_fill_inout_buf(&in, UBASE_OPC_UE_TO_PROXY, false,
+			       sizeof(*req) + data_len,
+			       req);
+	ret = __ubase_cmd_send_in(udev, &in);
+	if (ret) {
+		ubase_err(udev, "failed to send eq(%u) mbox over cmdq req, ret = %d.\n",
+			  req->seq_num, ret);
+		kfree(req);
+		return ret;
+	}
+
+	ret = ubase_wait_resp_from_proxy(udev, req, mailbox);
+	if (ret)
+		ubase_err(udev, "failed to wait eq(%u) mbox over cmdq resp, ret = %d.\n",
+			  req->seq_num, ret);
+
+	kfree(req);
+	return ret;
+}
+
+int ubase_handle_mbx_over_cmdq_resp(void *dev, void *data, u32 len)
+{
+	struct ubase_mbox_over_cmdq_completion *completion;
+	struct ubase_mbox_over_cmdq_info *info;
+	struct ubase_proxy_resp_msg *resp;
+	struct ubase_dev *udev = dev;
+
+	info = udev->moc_info;
+
+	if (len < sizeof(*resp)) {
+		ubase_err(udev, "proxy resp len error, len = %u.\n", len);
+		return -EINVAL;
+	}
+
+	resp = (struct ubase_proxy_resp_msg *)data;
+
+	xa_lock(&info->seq_tbl);
+	completion = xa_load(&info->seq_tbl, resp->seq_num);
+	if (!completion) {
+		ubase_err(udev, "proxy resp seq is invalid, seq = %u.\n",
+			  resp->seq_num);
+		xa_unlock(&info->seq_tbl);
+		return -EINVAL;
+	}
+
+	if (resp->data_len != completion->mbox_resp_len) {
+		ubase_err(udev, "eq(%u) proxy resp len error, cur = %u, expect = %u.\n",
+			  resp->seq_num, resp->data_len,
+			  completion->mbox_resp_len);
+		xa_unlock(&info->seq_tbl);
+		return -EINVAL;
+	}
+
+	completion->ret = resp->ret;
+	if (!resp->ret && resp->data_len)
+		memcpy(completion->mbox->buf, resp->data, resp->data_len);
+
+	completion->get_resp = true;
+	xa_unlock(&info->seq_tbl);
+
+	wake_up(&info->queue);
+
+	return 0;
+}
 
 int ubase_mbox_cmd_init(struct ubase_dev *udev)
 {
 	struct ubase_mbx_event_context *ctx = &udev->mb_cmd.ctx;
+
+	if (test_bit(UBASE_STATE_RST_HANDLING_B, &udev->state_bits))
+		return 0;
 
 	udev->mb_cmd.pool = dma_pool_create("ubase_mbox", udev->dev,
 					    UBASE_MAILBOX_SIZE,
@@ -21,9 +232,13 @@ int ubase_mbox_cmd_init(struct ubase_dev *udev)
 	if (!udev->mb_cmd.pool)
 		return -ENOMEM;
 
+	if (!ubase_dev_mbx_supported(udev))
+		return ubase_mbox_over_cmdq_init(udev);
+
 	sema_init(&udev->mb_cmd.sem, 1);
 	init_completion(&ctx->done);
 
+	atomic_set(&udev->mb_cmd.mbx_cnt, 0);
 	return 0;
 }
 
@@ -32,8 +247,16 @@ void ubase_mbox_cmd_uninit(struct ubase_dev *udev)
 	if (!udev->mb_cmd.pool)
 		return;
 
+	ubase_mailbox_buff_free(udev);
+
+	if (test_bit(UBASE_STATE_RST_HANDLING_B, &udev->state_bits))
+		return;
+
 	dma_pool_destroy(udev->mb_cmd.pool);
 	udev->mb_cmd.pool = NULL;
+
+	if (!ubase_dev_mbx_supported(udev))
+		ubase_mbox_over_cmdq_uninit(udev);
 }
 
 struct ubase_cmd_mailbox *__ubase_alloc_cmd_mailbox(struct ubase_dev *udev)
@@ -57,6 +280,8 @@ struct ubase_cmd_mailbox *__ubase_alloc_cmd_mailbox(struct ubase_dev *udev)
 		ubase_err(udev, "failed to alloc buffer of mailbox.\n");
 		goto failed_alloc_mailbox_buf;
 	}
+
+	atomic_set(&mailbox->count, 1);
 
 	return mailbox;
 
@@ -96,6 +321,9 @@ void __ubase_free_cmd_mailbox(struct ubase_dev *udev,
 		return;
 	}
 
+	if (!atomic_dec_and_test(&mailbox->count))
+		return;
+
 	dma_pool_free(udev->mb_cmd.pool, mailbox->buf, mailbox->dma);
 	kfree(mailbox);
 }
@@ -119,9 +347,21 @@ void ubase_free_cmd_mailbox(struct auxiliary_device *aux_dev,
 
 	udev = __ubase_get_udev_by_adev(aux_dev);
 
+	trace_ubase_free_mailbox_user(udev->dev, &mailbox->count, udev->mb_cmd.ctx.seq_num);
 	__ubase_free_cmd_mailbox(udev, mailbox);
 }
 EXPORT_SYMBOL(ubase_free_cmd_mailbox);
+
+void ubase_mailbox_buff_free(struct ubase_dev *udev)
+{
+	struct ubase_mbx_event_context *ctx = &udev->mb_cmd.ctx;
+
+	if (ctx->mbx_buff) {
+		trace_ubase_free_mailbox_self(udev->dev, &ctx->mbx_buff->count, ctx->seq_num);
+		__ubase_free_cmd_mailbox(udev, ctx->mbx_buff);
+		ctx->mbx_buff = NULL;
+	}
+}
 
 static int ubase_post_mailbox(struct ubase_dev *udev,
 			      struct ubase_cmdq_desc *desc,
@@ -249,7 +489,7 @@ static int ubase_cmd_mbox_event(struct ubase_dev *udev,
 	__ubase_fill_inout_buf(&out, UBASE_OPC_POST_MB, false,
 			       sizeof(union ubase_mbox), (void *)&mb_out);
 
-	ret = ubase_post_mailbox_by_event(udev, &in, &out);
+	ret = ubase_post_mailbox_by_event(udev, &in, &out, mailbox);
 	if (ret)
 		ubase_err(udev,
 			  "failed to post mailbox 0x%x in event mode, ret = %d.\n",
@@ -329,7 +569,6 @@ static int ubase_use_buf_ctx_page(struct ubase_dev *udev,
 	refcount_inc(&ctx_page->refcount);
 	mutex_unlock(&ctx_buf->ctx_mutex);
 
-	atomic_set(&udev->mb_cmd.mbx_cnt, 0);
 	return 0;
 err_store:
 	ubase_destroy_ctx_page(udev, ctx_page, ctx_buf);
@@ -405,8 +644,8 @@ static bool ubase_is_jfs_opcode(u8 op)
 }
 
 static struct ubase_ctx_buf_cap*
-ubase_parse_opcode_buf(struct ubase_dev *udev, struct ubase_mbx_attr *attr,
-		       enum ubase_mb_type *type)
+ubase_parse_ta_opcode_buf(struct ubase_dev *udev, struct ubase_mbx_attr *attr,
+			  enum ubase_mb_type *type)
 {
 	struct mbx_op_match ta_matches[] = {
 		{UBASE_MB_CREATE_JFS_CONTEXT, UBASE_MB_CREATE, &udev->ctx_buf.jfs},
@@ -432,11 +671,21 @@ ubase_parse_opcode_buf(struct ubase_dev *udev, struct ubase_mbx_attr *attr,
 	};
 	u32 size = ARRAY_SIZE(ta_matches);
 
+	return ubase_parse_common_buf(attr, ta_matches, type, size);
+}
+
+static struct ubase_ctx_buf_cap*
+ubase_parse_opcode_buf(struct ubase_dev *udev, struct ubase_mbx_attr *attr,
+		       enum ubase_mb_type *type)
+{
+	if (ubase_dev_dtu_supported(udev))
+		return NULL;
+
 	if (ubase_is_jfs_opcode(attr->op) &&
 	    test_bit(UBASE_STATE_PREALLOC_OK_B, &udev->state_bits))
 		return NULL;
 
-	return ubase_parse_common_buf(attr, ta_matches, type, size);
+	return ubase_parse_ta_opcode_buf(udev, attr, type);
 }
 
 static int ubase_check_buf_ctx_page(struct ubase_dev *udev,
@@ -503,6 +752,12 @@ int __ubase_hw_upgrade_ctx_ex(struct ubase_dev *udev,
 	struct ubase_ctx_buf_cap *ctx_buf;
 	int ret;
 
+	if (ubase_dev_usc_supported(udev) && ubase_ctx_in_usc(attr->op))
+		return __ubase_hw_upgrade_ctx(udev, attr, mailbox);
+
+	if (!ubase_dev_mbx_supported(udev))
+		return -EOPNOTSUPP;
+
 	ctx_buf = ubase_parse_opcode_buf(udev, attr, &type);
 	if (ctx_buf) {
 		if (type == UBASE_MB_CREATE) {
@@ -544,7 +799,12 @@ int __ubase_hw_upgrade_ctx_ex(struct ubase_dev *udev,
  * @attr: the mailbox attribute pointer
  * @mailbox: mailbox command address
  *
- * The function is used to upgrade hardware context.
+ * The function is used to upgrade hardware context. It can be used
+ * in the following two ways:
+ * 1. Combined mode: This function is used together with ubase_alloc_cmd_mailbox()
+ * and ubase_free_cmd_mailbox().
+ * 2. Independent mode: When used independently, the atomic variable 'count' in
+ * the ubase_cmd_mailbox structure must be 0.
  *
  * Context: Process context. Takes and releases <lock>, BH-safe. May sleep
  * Return: 0 on success, negative error code otherwise

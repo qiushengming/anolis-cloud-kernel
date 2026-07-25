@@ -6,6 +6,7 @@
 
 #include <linux/delay.h>
 #include <linux/module.h>
+#include <linux/pm.h>
 #include <ub/ubase/ubase_comm_dev.h>
 #include <ub/ubus/ub_black_box.h>
 
@@ -31,6 +32,23 @@ static const struct ub_device_id ubase_ubus_tbl[] = {
 	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_A_0_PMU_UE), 0, 0},
 	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_A_0_UBOE_MUE), 0, 0},
 	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_A_0_UBOE_UE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_S_0_URMA_MUE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_S_0_PMU_MUE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_S_0_CDMA_MUE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_K_V2_URMA_MUE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_K_V2_URMA_UE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_K_V2_CDMA_MUE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_K_V2_CDMA_UE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_K_V2_PMU_MUE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_K_V2_PMU_UE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_A_V2_URMA_MUE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_A_V2_URMA_UE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_A_V2_CDMA_MUE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_A_V2_CDMA_UE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_A_V2_PMU_MUE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_A_V2_PMU_UE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_A_V2_UBOE_MUE), 0, 0},
+	{UB_ENTITY(UBASE_VENDOR_ID, UBASE_DEV_ID_A_V2_UBOE_UE), 0, 0},
 	/* required last entry */
 	{0},
 };
@@ -142,6 +160,12 @@ static bool ubase_dev_reg_share_port_must_succ(struct ubase_dev *udev)
 	case UBASE_DEV_ID_K_0_CDMA_MUE:
 	case UBASE_DEV_ID_A_0_URMA_MUE:
 	case UBASE_DEV_ID_A_0_CDMA_MUE:
+	case UBASE_DEV_ID_S_0_URMA_MUE:
+	case UBASE_DEV_ID_S_0_CDMA_MUE:
+	case UBASE_DEV_ID_K_V2_URMA_MUE:
+	case UBASE_DEV_ID_K_V2_CDMA_MUE:
+	case UBASE_DEV_ID_A_V2_URMA_MUE:
+	case UBASE_DEV_ID_A_V2_CDMA_MUE:
 		break;
 	default:
 		return false;
@@ -294,7 +318,7 @@ static void ubase_ubus_shutdown(struct ub_entity *ue)
 
 	__ubase_ubus_remove(ue);
 
-	ubase_info(udev, "ubase shutdown end.\n");
+	dev_info(&ue->dev, "ubase shutdown end.\n");
 }
 
 int ubase_ubus_irq_vectors_alloc(struct device *dev)
@@ -515,3 +539,16 @@ void ubase_ubus_fault_log(struct ubase_dev *udev, u32 event_id, void *data)
 
 	ub_fault_log(ue, event_id, data);
 }
+
+/**
+ * ubase_get_ub_feature() - get ub feature
+ *
+ * This function is called when user wants to get ub feature.
+ *
+ * Context: Any context.
+ */
+unsigned long long ubase_get_ub_feature(void)
+{
+	return ub_feature_get();
+}
+EXPORT_SYMBOL(ubase_get_ub_feature);

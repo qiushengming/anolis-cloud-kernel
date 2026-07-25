@@ -861,7 +861,6 @@ static void ubase_init_udma_dscp_vl(struct ubase_dev *udev)
 
 static void ubase_parse_max_vl(struct ubase_dev *udev)
 {
-	struct ubase_adev_caps *udma_caps = &udev->caps.udma_caps;
 	struct ubase_adev_qos *qos = &udev->qos.adev_qos;
 	u8 i, ue_max_vl_id = 0;
 
@@ -879,7 +878,7 @@ static void ubase_parse_max_vl(struct ubase_dev *udev)
 	qos->ue_max_vl_id = ue_max_vl_id;
 
 	if (ubase_dev_urma_supported(udev) && !udev->use_fixed_rc_num)
-		udma_caps->rc_max_cnt *= (ue_max_vl_id + 1);
+		udev->caps.udma_caps.rc_max_cnt *= (ue_max_vl_id + 1);
 }
 
 static u8 ubase_get_nic_max_vl(struct ubase_dev *udev)
@@ -953,7 +952,7 @@ static int ubase_ctrlq_query_vl(struct ubase_dev *udev)
 
 	if (!cdma_vl_cnt) {
 		ubase_err(udev, "cdma doesn't have any vl.\n");
-		return -EIO;
+		return -EINVAL;
 	}
 
 	udev->qos.adev_qos.ctp_vl_num = cdma_vl_cnt;
@@ -1004,10 +1003,18 @@ static int ubase_ctrlq_query_sl(struct ubase_dev *udev)
 		return ret;
 	}
 
+	/* For compatibility, if the control plane returns 0,
+	 * the value returned by the IMP is used by default.
+	 */
 	rc_max_cnt = le16_to_cpu(resp.rc_max_cnt);
-	if (rc_max_cnt != 0) {
+	if (rc_max_cnt) {
 		udev->use_fixed_rc_num = true;
 		udev->caps.udma_caps.rc_max_cnt = rc_max_cnt;
+	}
+
+	if (!udev->caps.udma_caps.rc_max_cnt) {
+		ubase_err(udev, "rc max cnt is zero.\n");
+		return -EINVAL;
 	}
 
 	unic_sl_bitmap = le16_to_cpu(resp.unic_sl_bitmap);
@@ -1030,12 +1037,12 @@ static int ubase_ctrlq_query_sl(struct ubase_dev *udev)
 
 	if (!unic_sl_cnt) {
 		ubase_err(udev, "nic doesn't have any sl.\n");
-		return -EIO;
+		return -EINVAL;
 	}
 
 	if (!ubase_check_udma_sl_valid(udev, udma_tp_sl_cnt, udma_ctp_sl_cnt)) {
 		ubase_err(udev, "udma doesn't have any sl.\n");
-		return -EIO;
+		return -EINVAL;
 	}
 
 	udev->qos.adev_qos.nic_sl_num = unic_sl_cnt;
@@ -1251,6 +1258,65 @@ void ubase_update_udma_dscp_vl(struct auxiliary_device *adev, u8 *dscp_vl,
 				  dscp_vl[i] : qos->tp_req_vl[0];
 }
 EXPORT_SYMBOL(ubase_update_udma_dscp_vl);
+
+static int __ubase_set_dscp_tc_map(struct ubase_dev *udev, u64 dscp_bitmap,
+				   u8 *vl)
+{
+	struct ubase_adev_qos *qos = &udev->qos.adev_qos;
+	struct ubase_config_dscp_tc_cmd req = {0};
+	u8 backup_vl[UBASE_MAX_DSCP];
+	struct ubase_cmd_buf in;
+	u8 i, cnt = 0;
+	int ret;
+
+	memcpy(backup_vl, qos->dscp_vl, UBASE_MAX_DSCP);
+
+	for (i = 0; i < UBASE_MAX_DSCP; i++) {
+		if ((dscp_bitmap >> i) & 1)
+			qos->dscp_vl[i] = vl[i];
+
+		if (qos->dscp_vl[i])
+			cnt++;
+	}
+
+	req.map_type = cnt > 0 ? UBASE_DSCP_VL_MAP : UBASE_PRIO_VL_MAP;
+	memcpy(req.vl, qos->dscp_vl, UBASE_MAX_DSCP);
+
+	ubase_fill_inout_buf(&in, UBASE_OPC_CFG_DSCP_TC, false,
+			     sizeof(req), &req);
+	ret = __ubase_cmd_send_in(udev, &in);
+	if (ret) {
+		memcpy(qos->dscp_vl, backup_vl, UBASE_MAX_DSCP);
+		ubase_err(udev,
+			  "failed to set dscp tc map, ret = %d.\n", ret);
+	}
+
+	return ret;
+}
+
+/**
+ * ubase_set_dscp_tc_map() - set udma's dscp to tc mapping
+ * @adev: auxiliary device
+ * @dscp_bitmap: Bitmap where the DSCP takes effect
+ * @vl: dscp configuration for the corresponding VLAN
+ *
+ * This function is used by HCCN_TOOL to directly configure the DSCP and
+ * TC mapping relationship of the UDMA.
+ *
+ * Context: Any context.
+ */
+int ubase_set_dscp_tc_map(struct auxiliary_device *adev, u64 dscp_bitmap,
+			  u8 *vl)
+{
+	struct ubase_dev *udev;
+
+	if (!adev || !vl)
+		return -EINVAL;
+
+	udev = __ubase_get_udev_by_adev(adev);
+	return __ubase_set_dscp_tc_map(udev, dscp_bitmap, vl);
+}
+EXPORT_SYMBOL(ubase_set_dscp_tc_map);
 
 int ubase_query_tm_queue(struct ubase_dev *udev, u16 bus_ue_id,
 			 struct ubase_query_tm_queue_cmd *resp)

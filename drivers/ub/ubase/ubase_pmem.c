@@ -7,6 +7,7 @@
 #include <linux/math.h>
 #include <ub/ubase/ubase_comm_dev.h>
 
+#include "ubase_rct.h"
 #include "ubase_pmem.h"
 
 struct ubase_pmem_init_func {
@@ -34,12 +35,10 @@ static inline u16 ubase_calc_que_page_cnt(u32 que_num, u64 que_size)
 
 static u16 ubase_calc_udma_page_cnt(struct ubase_dev *udev)
 {
-#define RCE_SIZE 64
-
 	struct ubase_adev_caps *udma_caps = &udev->caps.udma_caps;
 	u32 rcq_size;
 
-	rcq_size = ALIGN(udma_caps->rc_que_depth * RCE_SIZE, PAGE_SIZE);
+	rcq_size = ALIGN(udma_caps->rc_que_depth * UBASE_RCE_SIZE, PAGE_SIZE);
 
 	return ubase_calc_que_page_cnt(udma_caps->rc_max_cnt, rcq_size);
 }
@@ -115,7 +114,8 @@ static int ubase_alloc_pmem(struct ubase_dev *udev, const char *type,
 	int i;
 
 	for (i = 0; i < page_cnt; i++) {
-		pgs[i] = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+		pgs[i] = alloc_pages_node(dev_to_node(udev->dev),
+					  udev->gfp | __GFP_ZERO, order);
 		if (!pgs[i]) {
 			ubase_err(udev,
 				  "failed to alloc %s pages[%d], page_cnt = %d, order = %d.\n",

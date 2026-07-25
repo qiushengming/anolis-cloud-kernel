@@ -20,17 +20,28 @@
 #include <ub/urma/udma/udma_ctl.h>
 #include "udma_eq.h"
 
-static inline int udma_ae_tp_ctrlq_msg_deal(struct udma_dev *udma_dev,
-					    struct ubase_aeq_notify_info *info,
-					    uint32_t queue_num)
+static int udma_ae_tp_ctrlq_msg_deal(struct udma_dev *udma_dev,
+				     struct ubase_aeq_notify_info *info,
+				     uint32_t queue_num)
 {
+	struct udma_ae_work *ae_work;
+
 	switch (info->event_type) {
 	case UBASE_EVENT_TYPE_TP_FLUSH_DONE:
-		return udma_ctrlq_tp_flush_done(udma_dev, queue_num);
+		ae_work = kzalloc(sizeof(*ae_work), GFP_ATOMIC);
+		if (!ae_work)
+			return -ENOMEM;
+
+		ae_work->udev = udma_dev;
+		ae_work->tpn = queue_num;
+		INIT_WORK(&ae_work->work, udma_tp_ae_work);
+		queue_work(udma_dev->ae_workq, &ae_work->work);
+		return 0;
 	case UBASE_EVENT_TYPE_TP_LEVEL_ERROR:
 		return udma_ctrlq_remove_single_tp(udma_dev, queue_num, TP_ERROR);
 	default:
-		dev_warn(udma_dev->dev, "udma get unsupported async event.\n");
+		dev_warn(udma_dev->dev, "udma get unsupported async event %u.\n",
+			 info->event_type);
 		return 0;
 	}
 }
@@ -424,7 +435,7 @@ static void udma_delete_tpn_ue_idx_info(struct udma_dev *udma_dev, uint32_t tpn)
 	xa_unlock(&udma_dev->tpn_ue_idx_table);
 }
 
-static int udma_save_tp_info(struct udma_dev *udma_dev, struct udma_ue_tp_info *info,
+int udma_save_tp_info(struct udma_dev *udma_dev, struct udma_ue_tp_info *info,
 			     uint8_t ue_idx)
 {
 	uint32_t tpn;
@@ -656,6 +667,11 @@ static int udma_ctrlq_eid_update(struct auxiliary_device *adev, uint8_t service_
 	}
 
 	udma_dev = get_udma_dev(adev);
+	if (service_ver != UBASE_CTRLQ_SER_VER_01) {
+		dev_err(udma_dev->dev, "unsupported service version (%u).\n", service_ver);
+		return -EOPNOTSUPP;
+	}
+
 	if (udma_dev->status != UDMA_NORMAL)
 		return udma_ctrlq_send_eid_update_response(udma_dev, seq, 0);
 
@@ -691,10 +707,15 @@ static int udma_ctrlq_check_tp_status(struct udma_dev *udev, void *data, uint16_
 				      uint32_t *rsp_info_len)
 {
 #define UDMA_CTRLQ_CHECK_TP_OFFSET 0xFF
-	struct udma_ctrlq_check_tp_active_req_info *req_info = NULL;
+struct udma_tp_active_req_info {
+	struct udma_ctrlq_check_tp_active_req_info *info;
+	struct rcu_head rcu;
+};
+
+	struct udma_tp_active_req_info tp_active_req;
 	uint32_t req_info_len;
 	uint32_t tp_num;
-	int i;
+	uint32_t i;
 
 	tp_num = *((uint32_t *)data) & UDMA_CTRLQ_CHECK_TP_OFFSET;
 	req_info_len = sizeof(struct udma_ctrlq_check_tp_active_req_info) +
@@ -703,29 +724,28 @@ static int udma_ctrlq_check_tp_status(struct udma_dev *udev, void *data, uint16_
 		dev_err(udev->dev, "msg param num(%u) is invalid.\n", tp_num);
 		return -EINVAL;
 	}
-	req_info = kzalloc(req_info_len, GFP_KERNEL);
-	if (!req_info)
+	tp_active_req.info = kzalloc(req_info_len, GFP_KERNEL);
+	if (!tp_active_req.info)
 		return -ENOMEM;
-	memcpy(req_info, data, req_info_len);
+	memcpy(tp_active_req.info, data, req_info_len);
 
 	*rsp_info_len = sizeof(struct udma_ctrlq_check_tp_active_rsp_info) +
 			sizeof(struct udma_ctrlq_check_tp_active_rsp_data) * tp_num;
 	*rsp_info = kzalloc(*rsp_info_len, GFP_KERNEL);
 	if (!(*rsp_info)) {
 		*rsp_info_len = 0;
-		kfree(req_info);
-		req_info = NULL;
+		kfree_rcu(&tp_active_req, rcu);
 		return -ENOMEM;
 	}
 
 	rcu_read_lock();
-	for (i = 0; i < req_info->num; i++) {
-		if (find_vpid(req_info->data[i].pid_flag))
+	for (i = 0; i < tp_active_req.info->num; i++) {
+		if (find_vpid(tp_active_req.info->data[i].pid_flag))
 			(*rsp_info)->data[i].result = UDMA_CTRLQ_TPID_IN_USE;
 		else
 			(*rsp_info)->data[i].result = UDMA_CTRLQ_TPID_EXITED;
 
-		(*rsp_info)->data[i].tp_id = req_info->data[i].tp_id;
+		(*rsp_info)->data[i].tp_id = tp_active_req.info->data[i].tp_id;
 	}
 	(*rsp_info)->num = tp_num;
 	rcu_read_unlock();
@@ -733,8 +753,8 @@ static int udma_ctrlq_check_tp_status(struct udma_dev *udev, void *data, uint16_
 	if (debug_switch)
 		udma_dfx_ctx_print(udev, "udma check tp active", (*rsp_info)->data[0].tp_id,
 				   *rsp_info_len / sizeof(uint32_t), (uint32_t *)(*rsp_info));
-	kfree(req_info);
-	req_info = NULL;
+
+	kfree_rcu(&tp_active_req, rcu);
 
 	return 0;
 }
@@ -758,15 +778,26 @@ static int udma_ctrlq_check_tp_active(struct auxiliary_device *adev,
 				      uint8_t service_ver, void *data,
 				      uint16_t len, uint16_t seq)
 {
-	struct udma_ctrlq_check_tp_active_rsp_info *rsp_info = NULL;
+struct udma_tp_active_rsq_info {
+	struct udma_ctrlq_check_tp_active_rsp_info *info;
+	struct rcu_head rcu;
+};
+
+	struct udma_tp_active_rsq_info tp_active_rsq;
 	struct udma_dev *udev = get_udma_dev(adev);
 	struct ubase_ctrlq_msg msg = {};
 	uint32_t rsp_info_len = 0;
 	int ret;
 
+	if (service_ver != UBASE_CTRLQ_SER_VER_01) {
+		dev_err(udev->dev, "unsupported service version (%u).\n", service_ver);
+		return -EOPNOTSUPP;
+	}
+
 	ret = udma_ctrlq_check_tp_active_param(udev, data, len);
 	if (ret == 0) {
-		ret = udma_ctrlq_check_tp_status(udev, data, len, &rsp_info, &rsp_info_len);
+		ret = udma_ctrlq_check_tp_status(udev, data, len, &tp_active_rsq.info,
+						 &rsp_info_len);
 		if (ret)
 			dev_err(udev->dev, "check tp status failed, ret(%d).\n", ret);
 	}
@@ -777,7 +808,7 @@ static int udma_ctrlq_check_tp_active(struct auxiliary_device *adev,
 	msg.need_resp = 0;
 	msg.is_resp = 1;
 	msg.in_size = (uint16_t)rsp_info_len;
-	msg.in = (void *)rsp_info;
+	msg.in = (void *)tp_active_rsq.info;
 	msg.resp_seq = seq;
 	msg.resp_ret = (uint8_t)(-ret);
 
@@ -785,8 +816,7 @@ static int udma_ctrlq_check_tp_active(struct auxiliary_device *adev,
 	if (ret)
 		dev_err(udev->dev, "send check tp active ctrlq msg failed, ret(%d).\n", ret);
 
-	kfree(rsp_info);
-	rsp_info = NULL;
+	kfree_rcu(&tp_active_rsq, rcu);
 
 	return ret;
 }
@@ -834,6 +864,11 @@ static int udma_ctrlq_notify_mue_eid_guid(struct auxiliary_device *adev,
 	}
 
 	udma_dev = get_udma_dev(adev);
+	if (service_ver != UBASE_CTRLQ_SER_VER_01) {
+		dev_err(udma_dev->dev, "unsupported service version (%u).\n", service_ver);
+		return -EOPNOTSUPP;
+	}
+
 	if (udma_dev->is_ue)
 		return 0;
 
@@ -944,7 +979,7 @@ err_register_one_ctrlq_event:
 	return ret;
 }
 
-int udma_register_activate_workqueue(struct udma_dev *udma_dev)
+int udma_register_workqueue(struct udma_dev *udma_dev)
 {
 	udma_dev->act_workq = alloc_workqueue("udma_activate_workq", WQ_UNBOUND, 0);
 	if (!udma_dev->act_workq) {
@@ -952,11 +987,21 @@ int udma_register_activate_workqueue(struct udma_dev *udma_dev)
 		return -ENOMEM;
 	}
 
+	udma_dev->ae_workq = alloc_workqueue("udma_ae_workq", WQ_UNBOUND, 0);
+	if (!udma_dev->ae_workq) {
+		dev_err(udma_dev->dev, "failed to create ae workqueue.\n");
+		flush_workqueue(udma_dev->act_workq);
+		destroy_workqueue(udma_dev->act_workq);
+		return -ENOMEM;
+	}
+
 	return 0;
 }
 
-void udma_unregister_activate_workqueue(struct udma_dev *udma_dev)
+void udma_unregister_workqueue(struct udma_dev *udma_dev)
 {
 	flush_workqueue(udma_dev->act_workq);
+	flush_workqueue(udma_dev->ae_workq);
 	destroy_workqueue(udma_dev->act_workq);
+	destroy_workqueue(udma_dev->ae_workq);
 }

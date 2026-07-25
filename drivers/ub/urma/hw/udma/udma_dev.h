@@ -11,6 +11,7 @@
 #include <uapi/ub/urma/udma/udma_abi.h>
 #include <ub/urma/udma/udma_ctl.h>
 
+extern bool dev_name_style;
 extern bool dfx_switch;
 extern bool cqe_mode;
 extern uint32_t batch_flush_query_freq;
@@ -125,7 +126,6 @@ struct udma_dev {
 	struct udma_table jfc_table;
 	struct udma_table jetty_grp_table;
 	struct udma_ida rsvd_jetty_ida_table;
-	struct udma_table rc_table;
 	struct xarray crq_nb_table;
 	struct xarray npu_nb_table;
 	struct mutex npu_nb_mutex;
@@ -135,6 +135,7 @@ struct udma_dev {
 	resource_size_t db_base;
 	void __iomem *k_db_base;
 	struct workqueue_struct *act_workq;
+	struct workqueue_struct *ae_workq;
 	struct xarray ksva_table;
 	struct mutex ksva_mutex;
 	struct xarray eid_table;
