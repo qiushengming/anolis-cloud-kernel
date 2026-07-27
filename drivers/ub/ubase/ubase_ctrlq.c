@@ -36,6 +36,10 @@ static const struct ubase_ctrlq_event_nb ubase_ctrlq_wlist_udma[] = {
 		.service_type = UBASE_CTRLQ_SER_TYPE_DEV_REGISTER,
 		.opcode = UBASE_CTRLQ_OPC_NOTIFY_RES_RATIO,
 	},
+	{
+		.service_type = UBASE_CTRLQ_SER_TYPE_TP_ACL,
+		.opcode = UBASE_CTRLQ_OPC_TPID_DEL_DONE,
+	},
 };
 
 /* CDMA ctrlq msg white list */
@@ -1418,7 +1422,7 @@ static void ubase_ctrlq_crq_handler(struct ubase_dev *udev)
 	}
 
 	if (!ubase_ctrlq_crq_is_empty(udev, &udev->hw))
-		ubase_ctrlq_task_schedule(udev, 1);
+		ubase_ctrlq_task_schedule(udev, 0);
 }
 
 void ubase_ctrlq_crq_service_task(struct ubase_delay_work *ubase_work)

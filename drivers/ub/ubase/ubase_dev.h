@@ -177,6 +177,7 @@ enum ubase_dev_state_bit {
 	UBASE_STATE_REMOVING_B,
 	UBASE_STATE_INIT_AGAIN_B,
 	UBASE_STATE_RST_TIMEOUT_RETRY_B,
+	UBASE_STATE_RST_FAILED_B,
 };
 
 struct ubase_crq_event_nbs {
@@ -378,6 +379,17 @@ struct ubase_mem_init_ops {
 
 typedef int (*ub_entity_enable_ret)(struct ub_entity *uent, u8 enable);
 
+struct ubase_mbx_stats {
+	u64	event_hw_cnt;
+	u64	cmd_timeout_cnt;
+	u64	event_hw_timeout_cnt;
+	u64	ae_cnt;
+	u64	seq_num_err_cnt;
+	u64	buff_cnt;
+	u64	buff_free_cnt;
+	u64	buff_not_empty_cnt;
+};
+
 struct ubase_dev {
 	struct device		*dev;
 	int			dev_id;
@@ -418,6 +430,7 @@ struct ubase_dev {
 	enum ubase_reset_type	reset_type;
 	unsigned long		last_reset_scheduled;
 	enum ubase_reset_stage	reset_stage;
+	struct ubase_mbx_stats	mbx_stats;
 	struct ubase_ctx_status	ctx_status;
 	struct ubase_stats	stats;
 	struct ubase_act_ctx	act_ctx;

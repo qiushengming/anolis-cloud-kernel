@@ -22,7 +22,7 @@ struct udma_context {
 	struct list_head page_list;
 	struct device *ummu_dev;
 	struct mm_struct *mm;
-	struct udma_seg_tree_node *seg_node;
+	struct udma_seg_tree *seg_tree;
 	bool dtu_en;
 	uint32_t dtu_win_num;
 };
