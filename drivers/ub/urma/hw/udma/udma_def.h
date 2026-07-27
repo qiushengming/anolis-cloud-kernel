@@ -15,15 +15,17 @@
 #define NUM_JETTY_PER_GROUP 32
 
 enum {
-	UDMA_CAP_FEATURE_AR			= BIT(0),
-	UDMA_CAP_FEATURE_JFC_INLINE		= BIT(4),
-	UDMA_CAP_FEATURE_DIRECT_WQE		= BIT(11),
-	UDMA_CAP_FEATURE_CONG_CTRL		= BIT(16),
-	UDMA_CAP_FEATURE_REDUCE			= BIT(17),
-	UDMA_CAP_FEATURE_UE_RX_CLOSE		= BIT(18),
-	UDMA_CAP_FEATURE_RNR_RETRY		= BIT(19),
-	UDMA_CAP_FEATURE_WRITE_ATOMIC_ADD	= BIT(21),
-	UDMA_CAP_FEATURE_NOT_SHARE_JFC		= BIT(27),
+	UDMA_CAP_FEATURE_AR				= BIT(0),
+	UDMA_CAP_FEATURE_JFC_INLINE			= BIT(4),
+	UDMA_CAP_FEATURE_DIRECT_WQE			= BIT(11),
+	UDMA_CAP_FEATURE_CONG_CTRL			= BIT(16),
+	UDMA_CAP_FEATURE_REDUCE				= BIT(17),
+	UDMA_CAP_FEATURE_UE_RX_CLOSE			= BIT(18),
+	UDMA_CAP_FEATURE_RNR_RETRY			= BIT(19),
+	UDMA_CAP_FEATURE_WRITE_ATOMIC_ADD	        = BIT(21),
+	UDMA_CAP_FEATURE_RC_CTP_MULTIPLE_PATH_MODE	= BIT(26),
+	UDMA_CAP_FEATURE_NOT_SHARE_JFC			= BIT(27),
+	UDMA_CAP_FEATURE_PORT_CHANGE_AE			= BIT(29),
 };
 
 struct udma_res {
@@ -54,7 +56,6 @@ struct udma_udp_sport {
 };
 
 struct udma_caps {
-	unsigned long init_flag;
 	struct udma_res jfs;
 	struct udma_res jfr;
 	struct udma_res jfc;
@@ -82,6 +83,8 @@ struct udma_caps {
 	struct udma_res stars_jetty;
 	struct udma_res public_jetty;
 	struct udma_res user_ctrl_normal_jetty;
+	struct udma_res ccu_jfc;
+	struct udma_res stars_jfc;
 	struct udma_ucp_caps ucp_caps;
 	uint8_t ack_queue_num;
 	uint8_t port_num;
@@ -93,6 +96,8 @@ struct udma_caps {
 	bool ctp_en;
 	bool ipourma_en;
 	bool sva_sep_mode_en;
+	bool non_mirror_en;
+	bool st64b_en;
 	bool atomic_add_en;
 };
 
@@ -185,7 +190,6 @@ struct udma_buf {
 		struct iova_slot	*slot;
 		void			*kva_or_slot;
 	};
-	void			*aligned_va;
 	struct udma_umem	*umem;
 	uint32_t		entry_size;
 	uint32_t		entry_cnt;
@@ -193,8 +197,9 @@ struct udma_buf {
 	struct xarray		id_table_xa;
 	struct mutex		id_table_mutex;
 	bool			is_hugepage;
+	bool			k_dtu_enable;
 	struct udma_hugepage	*hugepage;
-	uint32_t		len;
+	uint64_t		len;
 	struct udma_page_priv	*page_priv;
 };
 

@@ -66,9 +66,11 @@ extern bool jfc_share_enable;
 					UDMA_FAULT_EVENT_REMOVE)
 
 enum udma_status {
+	UDMA_INITIALIZING,
 	UDMA_NORMAL,
-	UDMA_SUSPEND,
-	UDMA_ABORT,
+	UDMA_RESETTING,
+	UDMA_REMOVING,
+	UDMA_ELR_ABORT,
 };
 
 struct udma_ida {
@@ -110,6 +112,17 @@ struct udma_ex_jfc_addr {
 	uint32_t cq_len;
 };
 
+struct udma_dtu_info {
+	uint16_t win_num;
+	uint64_t pa_base;
+	uint64_t pa_size;
+	uint64_t va_base;
+	uint64_t iova_base;
+	uint64_t dtu_mem_node_id;
+	bool k_dtu_enable;
+	bool u_dtu_enable;
+};
+
 struct udma_dev {
 	struct ubase_adev_com comdev;
 	struct ubcore_device ub_dev;
@@ -145,11 +158,14 @@ struct udma_dev {
 	struct mutex eid_mutex;
 	struct xarray eid_guid_table;
 	struct mutex eid_guid_mutex;
+	struct xarray seg_tree_table;
+	struct mutex seg_tree_mutex;
 	uint32_t tid;
 	struct iommu_sva *ksva;
 	struct list_head db_list[UDMA_DB_TYPE_NUM];
 	struct mutex db_mutex;
 	struct udma_dfx_info *dfx_info;
+	uint32_t hw_ver;
 	uint32_t status;
 	uint32_t ue_num;
 	struct udma_ex_jfc_addr cq_addr_array[UDMA_JFC_TYPE_NUM];
@@ -173,9 +189,10 @@ struct udma_dev {
 	struct mutex hugepage_lock;
 	struct list_head hugepage_list;
 	atomic_t hugepage_seq;
-	struct udma_tp_cmdq_info *wait_cmdq_info;
+	struct udma_cmdq_info *wait_cmdq_info;
 	struct udma_sq_reserved_info sq_reserved_info;
 	struct udma_mbox_over_cmdq_info *mbox_over_cmdq_info;
+	struct udma_dtu_info dtu_info;
 };
 
 #define UDMA_ERR_MSG_LEN	128

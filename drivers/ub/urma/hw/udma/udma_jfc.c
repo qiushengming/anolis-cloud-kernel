@@ -39,14 +39,17 @@ static void udma_construct_jfc_ctx(struct udma_dev *dev,
 		ctx->inline_en = jfc->inline_en;
 	ctx->cqe_va_l = jfc->buf.addr >> CQE_VA_L_OFFSET;
 	ctx->cqe_va_h = jfc->buf.addr >> CQE_VA_H_OFFSET;
-	ctx->cqe_token_id = jfc->tid;
+	ctx->hw_ver_0.cqe_token_id = jfc->tid;
 
 	if (cqe_mode)
-		ctx->cq_cnt_mode = UDMA_CQE_CNT_MODE_BY_CI_PI_GAP;
+		ctx->hw_ver_0.cq_cnt_mode = UDMA_CQE_CNT_MODE_BY_CI_PI_GAP;
 	else
-		ctx->cq_cnt_mode = UDMA_CQE_CNT_MODE_BY_COUNT;
+		ctx->hw_ver_0.cq_cnt_mode = UDMA_CQE_CNT_MODE_BY_COUNT;
 
-	ctx->ceqn = jfc->ceqn;
+	if (dev->hw_ver == UBASE_HW_VER_K_1 || dev->hw_ver == UBASE_HW_VER_A_1)
+		ctx->hw_ver_1.ceqn = jfc->ceqn;
+	else
+		ctx->hw_ver_0.ceqn = jfc->ceqn;
 	if (jfc->stars_en) {
 		ctx->stars_en = UDMA_STARS_SWITCH;
 		ctx->record_db_en = UDMA_NO_RECORD_EN;
@@ -73,7 +76,7 @@ int udma_check_jfc_cfg(struct udma_dev *dev, struct udma_jfc *jfc,
 		       struct ubcore_jfc_cfg *cfg)
 {
 	if (!jfc->buf.entry_cnt || jfc->buf.entry_cnt > dev->caps.jfc.depth) {
-		dev_err(dev->dev, "invalid jfc depth = %u, cap depth = %u.\n",
+		dev_err(dev->dev, "invalid JFC depth = %u, cap depth = %u.\n",
 			jfc->buf.entry_cnt, dev->caps.jfc.depth);
 		return -EINVAL;
 	}
@@ -96,7 +99,7 @@ static int udma_parse_cmd(struct udma_dev *dev, struct udma_create_jfc_ucmd *ucm
 	unsigned long byte;
 
 	if (!udata->udrv_data || !udata->udrv_data->in_addr) {
-		dev_err(dev->dev, "jfc udrv_data or in_addr is null.\n");
+		dev_err(dev->dev, "JFC user driver data or input address is null.\n");
 		return -EINVAL;
 	}
 
@@ -104,7 +107,7 @@ static int udma_parse_cmd(struct udma_dev *dev, struct udma_create_jfc_ucmd *ucm
 		ucmd, (void *)(uintptr_t)udata->udrv_data->in_addr,
 		min(udata->udrv_data->in_len, (uint32_t)sizeof(*ucmd)));
 	if (byte) {
-		dev_err(dev->dev, "failed to copy udata from user, byte = %lu.\n", byte);
+		dev_err(dev->dev, "failed to copy user data from user, byte = %lu.\n", byte);
 		return -EFAULT;
 	}
 
@@ -145,21 +148,27 @@ static int udma_alloc_u_cq(struct udma_dev *dev, struct udma_create_jfc_ucmd *uc
 	jfc->db.db_addr = ucmd->db_addr;
 	jfc->db.page_priv = udma_get_sw_db(jfc->ctx, jfc->db.db_addr);
 	if (jfc->db.page_priv == NULL) {
-		dev_err(dev->dev, "failed to get jfc db page.\n");
+		dev_err(dev->dev, "failed to get JFC doorbell page.\n");
 		return ret;
 	}
-
-	if (ucmd->is_hugepage) {
+	jfc->dtu_en = ucmd->dtu_en;
+	jfc->buf.entry_size = dev->caps.cqe_size;
+	if (jfc->dtu_en) {
+		ret = udma_dtu_uva_remap(dev, &jfc->buf, &jfc->dtu_pg_info);
+		if (ret) {
+			dev_err(dev->dev, "failed to remap CQ, ret = %d.\n", ret);
+			goto err_get_buf_page;
+		}
+	} else if (ucmd->is_hugepage) {
 		if (!udma_alloc_u_hugepage(jfc->ctx, jfc->buf.addr, jfc->buf.len)) {
-			dev_err(dev->dev, "failed to create cq.\n");
-
+			dev_err(dev->dev, "failed to create CQ.\n");
 			goto err_get_buf_page;
 		}
 		jfc->buf.is_hugepage = true;
 	} else {
 		jfc->buf.page_priv = udma_get_map_page_priv(jfc->ctx, jfc->buf.addr, jfc->buf.len);
 		if (jfc->buf.page_priv == NULL) {
-			dev_err(dev->dev, "failed to get jfc buf page.\n");
+			dev_err(dev->dev, "failed to get JFC buffer page.\n");
 			goto err_get_buf_page;
 		}
 	}
@@ -180,16 +189,16 @@ static int udma_alloc_k_cq(struct udma_dev *dev, struct udma_jfc *jfc)
 
 	jfc->buf.entry_size = dev->caps.cqe_size;
 	jfc->tid = dev->tid;
-	ret = udma_k_alloc_buf(dev, &jfc->buf);
+	ret = udma_k_alloc_buf(dev, &jfc->buf, true);
 	if (ret) {
-		dev_err(dev->dev, "failed to alloc cq buffer, id=%u.\n", jfc->jfcn);
+		dev_err(dev->dev, "failed to alloc CQ buffer, id=%u.\n", jfc->jfcn);
 		return ret;
 	}
 
 	ret = udma_alloc_sw_db(dev, &jfc->db, UDMA_JFC_TYPE_DB);
 	if (ret) {
-		dev_err(dev->dev, "failed to alloc sw db for jfc(%u).\n", jfc->jfcn);
-		udma_k_free_buf(dev, &jfc->buf);
+		dev_err(dev->dev, "failed to alloc SW doorbell for JFC(%u).\n", jfc->jfcn);
+		udma_k_free_buf(dev, &jfc->buf, true);
 	}
 
 	return ret;
@@ -200,10 +209,12 @@ static void udma_free_cq(struct udma_dev *dev, struct udma_jfc *jfc)
 	if (jfc->mode != UDMA_NORMAL_JFC_TYPE)
 		return;
 	if (jfc->buf.kva) {
-		udma_k_free_buf(dev, &jfc->buf);
+		udma_k_free_buf(dev, &jfc->buf, true);
 		udma_free_sw_db(dev, &jfc->db);
 	} else {
-		if (jfc->buf.is_hugepage)
+		if (jfc->dtu_en)
+			udma_dtu_uva_unremap(dev, &jfc->buf, &jfc->dtu_pg_info);
+		else if (jfc->buf.is_hugepage)
 			udma_free_u_hugepage(jfc->ctx, jfc->buf.addr);
 		else
 			udma_put_map_page_priv(jfc->ctx, jfc->buf.page_priv);
@@ -247,7 +258,7 @@ static int udma_verify_stars_jfc_param(struct udma_dev *dev,
 	uint32_t size;
 
 	if (!jfc_addr->cq_addr) {
-		dev_err(dev->dev, "CQE addr is wrong.\n");
+		dev_err(dev->dev, "CQE address is wrong.\n");
 		return -ENOMEM;
 	}
 	if (!jfc_addr->cq_len) {
@@ -258,7 +269,8 @@ static int udma_verify_stars_jfc_param(struct udma_dev *dev,
 	size = jfc->buf.entry_cnt * dev->caps.cqe_size;
 
 	if (size != jfc_addr->cq_len) {
-		dev_err(dev->dev, "cqe buff size is wrong, buf size = %u.\n", size);
+		dev_err(dev->dev, "cqe buff size is wrong, buf size = %u, cq_len = %u.\n",
+			size, jfc_addr->cq_len);
 		return -EINVAL;
 	}
 
@@ -281,21 +293,71 @@ static int udma_get_stars_jfc_buf(struct udma_dev *dev, struct udma_jfc *jfc)
 	return 0;
 }
 
+int udma_alloc_ccu_stars_id(struct udma_dev *dev, struct udma_ida *ida_table,
+			    struct udma_res *jfc_res, uint32_t *idx)
+{
+	uint32_t max = jfc_res->start_idx + jfc_res->max_cnt - 1;
+	uint32_t min = jfc_res->start_idx;
+	int id;
+
+	spin_lock(&ida_table->lock);
+	id = ida_alloc_range(&ida_table->ida, jfc_res->next_idx, max, GFP_ATOMIC);
+	if (id < 0) {
+		id = ida_alloc_range(&ida_table->ida, min, max, GFP_ATOMIC);
+		if (id < 0) {
+			spin_unlock(&ida_table->lock);
+			dev_err(dev->dev, "failed to alloc id, ret = %d.\n", id);
+			return id == -ENOSPC ? -ENOSR : id;
+		}
+	}
+
+	jfc_res->next_idx = (uint32_t)id + 1 > max ? min : (uint32_t)id + 1;
+
+	*idx = (uint32_t)id;
+	spin_unlock(&ida_table->lock);
+
+	return 0;
+}
+
+static int udma_alloc_stars_ccu_jfc_id_detail(struct udma_dev *dev, struct udma_jfc *jfc)
+{
+	struct udma_ida *ida_table = &dev->jfc_table.ida_table;
+	struct udma_res *stars_jfc = &dev->caps.stars_jfc;
+	struct udma_res *ccu_jfc = &dev->caps.ccu_jfc;
+	int ret;
+
+	if (jfc->mode == UDMA_STARS_JFC_TYPE)
+		ret = udma_alloc_ccu_stars_id(dev, ida_table, stars_jfc, &jfc->jfcn);
+	else
+		ret = udma_alloc_ccu_stars_id(dev, ida_table, ccu_jfc, &jfc->jfcn);
+	if (ret) {
+		dev_err(dev->dev, "failed to alloc id for stars or ccu jfc, ret=%d, jfc_mode=%u.\n",
+			ret, jfc->mode);
+		return ret;
+	}
+
+	return 0;
+}
+
 static int udma_create_stars_jfc(struct udma_dev *dev,
 				 struct udma_jfc *jfc,
 				 struct ubcore_jfc_cfg *cfg,
 				 struct ubcore_udata *udata,
 				 struct udma_create_jfc_ucmd *ucmd)
 {
+	struct udma_res *stars_jfc = &dev->caps.stars_jfc;
+	struct udma_res *ccu_jfc = &dev->caps.ccu_jfc;
 	unsigned long flags_store;
 	unsigned long flags_erase;
 	int ret;
 
-	ret = udma_id_alloc_auto_grow(dev, &dev->jfc_table.ida_table, &jfc->jfcn);
-	if (ret) {
-		dev_err(dev->dev, "failed to alloc id for stars JFC.\n");
+	if ((ccu_jfc->start_idx != 0 && ccu_jfc->max_cnt != 0) ||
+	    (stars_jfc->start_idx != 0 && stars_jfc->max_cnt != 0))
+		ret = udma_alloc_stars_ccu_jfc_id_detail(dev, jfc);
+	else
+		ret = udma_id_alloc_auto_grow(dev, &dev->jfc_table.ida_table, &jfc->jfcn);
+	if (ret)
 		return ret;
-	}
 
 	udma_init_jfc_param(cfg, jfc);
 	xa_lock_irqsave(&dev->jfc_table.xa, flags_store);
@@ -303,7 +365,7 @@ static int udma_create_stars_jfc(struct udma_dev *dev,
 	xa_unlock_irqrestore(&dev->jfc_table.xa, flags_store);
 	if (ret) {
 		dev_err(dev->dev,
-			"failed to stored stars jfc id to jfc_table, jfcn: %u.\n",
+			"failed to stored stars JFC id to JFC table, jfcn: %u.\n",
 			jfc->jfcn);
 		goto err_store_jfcn;
 	}
@@ -331,38 +393,93 @@ err_alloc_cqc:
 err_store_jfcn:
 	udma_id_free(&dev->jfc_table.ida_table, jfc->jfcn);
 
-	return -ENOMEM;
+	return ret;
 }
 
-static int udma_alloc_jfc_id(struct udma_dev *udma_dev, uint32_t *idx, struct udma_res *jetty_res)
+static int udma_alloc_normal_jfc_id(struct udma_dev *udma_dev, uint32_t min,
+				    uint32_t max, uint32_t *idx)
 {
-	uint32_t max = jetty_res->start_idx + jetty_res->max_cnt - 1;
-	struct ida *ida = &udma_dev->jfc_table.ida_table.ida;
-	uint32_t min = jetty_res->start_idx;
-	uint32_t next = jetty_res->next_idx;
-	int ret;
+	struct udma_ida *ida_table = &udma_dev->jfc_table.ida_table;
+	int id;
 
-	if (jetty_res->max_cnt == 0) {
-		dev_err(udma_dev->dev, "ida alloc failed max_cnt is 0.\n");
-		return -EINVAL;
+	id = ida_alloc_range(&ida_table->ida, ida_table->next, max, GFP_ATOMIC);
+	if (id < 0) {
+		dev_err(udma_dev->dev, "failed to alloc id, ret = %d, next = %u, max = %u.\n",
+			id, ida_table->next, max);
+		return id;
 	}
 
-	spin_lock(&udma_dev->jfc_table.ida_table.lock);
-	ret = ida_alloc_range(ida, next, max, GFP_ATOMIC);
-	if (ret < 0) {
-		ret = ida_alloc_range(ida, min, max, GFP_ATOMIC);
-		if (ret < 0) {
-			spin_unlock(&udma_dev->jfc_table.ida_table.lock);
-			dev_err(udma_dev->dev, "ida alloc failed %d.\n", ret);
-			return ret == -ENOSPC ? -ENOSR : ret;
-		}
-	}
-
-	*idx = (uint32_t)ret;
-	jetty_res->next_idx = (*idx + 1) > max ? min : (*idx + 1);
-	spin_unlock(&udma_dev->jfc_table.ida_table.lock);
+	ida_table->next = (uint32_t)id + 1;
+	*idx = (uint32_t)id;
 
 	return 0;
+}
+
+static int udma_alloc_normal_jfc_id_detail(struct udma_dev *udma_dev, uint32_t *idx)
+{
+	struct udma_ida *ida_table = &udma_dev->jfc_table.ida_table;
+	struct udma_res *stars_jfc = &udma_dev->caps.stars_jfc;
+	struct udma_res *ccu_jfc = &udma_dev->caps.ccu_jfc;
+	uint32_t min;
+	uint32_t max;
+	int ret;
+
+	if (ida_table->max == 0)
+		return -EINVAL;
+
+	if ((ccu_jfc->start_idx != 0 && ccu_jfc->max_cnt != 0) ||
+	    (stars_jfc->start_idx != 0 && stars_jfc->max_cnt != 0)) {
+		spin_lock(&ida_table->lock);
+
+		min = ida_table->min;
+		max = ccu_jfc->start_idx - 1;
+		if (ida_table->next >= min && ida_table->next <= max) {
+			ret = udma_alloc_normal_jfc_id(udma_dev, min, max, idx);
+			if (ret == 0) {
+				if (ida_table->next > max)
+					ida_table->next = ccu_jfc->start_idx + ccu_jfc->max_cnt;
+				spin_unlock(&ida_table->lock);
+				return 0;
+			}
+			ida_table->next = ccu_jfc->start_idx + ccu_jfc->max_cnt;
+		}
+
+		min = ccu_jfc->start_idx + ccu_jfc->max_cnt;
+		max = stars_jfc->start_idx - 1;
+		if (ida_table->next >= min && ida_table->next <= max) {
+			ret = udma_alloc_normal_jfc_id(udma_dev, min, max, idx);
+			if (ret == 0) {
+				if (ida_table->next > max)
+					ida_table->next = stars_jfc->start_idx + stars_jfc->max_cnt;
+				spin_unlock(&ida_table->lock);
+				return 0;
+			}
+			ida_table->next = stars_jfc->start_idx + stars_jfc->max_cnt;
+		}
+
+		min = stars_jfc->start_idx + stars_jfc->max_cnt;
+		max = ida_table->max;
+		if (ida_table->next >= min && ida_table->next <= max) {
+			ret = udma_alloc_normal_jfc_id(udma_dev, min, max, idx);
+			if (ret == 0) {
+				if (ida_table->next > ida_table->max)
+					ida_table->next = ida_table->min;
+				spin_unlock(&ida_table->lock);
+				return 0;
+			}
+			ida_table->next = ida_table->min;
+		}
+
+		spin_unlock(&ida_table->lock);
+	} else {
+		ret = udma_id_alloc_auto_grow(udma_dev, &udma_dev->jfc_table.ida_table, idx);
+		if (ret == 0)
+			return 0;
+	}
+
+	dev_err(udma_dev->dev, "udma alloc jfc id failed, ret=%d, ida_tablb_next=%u.\n",
+		ret, ida_table->next);
+	return ret;
 }
 
 static int udma_jfc_alloc_resource(struct udma_dev *dev, struct ubcore_jfc_cfg *cfg,
@@ -375,7 +492,7 @@ static int udma_jfc_alloc_resource(struct udma_dev *dev, struct ubcore_jfc_cfg *
 	int ret = 0;
 
 	if (!jfc_seted_before) {
-		ret = udma_alloc_jfc_id(dev, &jfc->jfcn, &dev->caps.jfc);
+		ret = udma_alloc_normal_jfc_id_detail(dev, &jfc->jfcn);
 		if (ret) {
 			dev_err(dev->dev, "failed to alloc id for JFC.\n");
 			return ret;
@@ -385,7 +502,7 @@ static int udma_jfc_alloc_resource(struct udma_dev *dev, struct ubcore_jfc_cfg *
 		ret = xa_err(__xa_store(&dev->jfc_table.xa, jfc->jfcn, jfc, GFP_ATOMIC));
 		xa_unlock_irqrestore(&dev->jfc_table.xa, flags_store);
 		if (ret) {
-			dev_err(dev->dev, "failed to stored jfc id to jfc_table, jfcn: %u.\n",
+			dev_err(dev->dev, "failed to stored JFC id to JFC table, jfcn: %u.\n",
 				jfc->jfcn);
 			goto err_store_jfcn;
 		}
@@ -409,6 +526,34 @@ err_store_jfcn:
 	jfc->jfcn = UDMA_INIT_JFC_ID;
 
 	return ret;
+}
+
+static int udma_jfc_copy_resp(struct udma_dev *dev, struct udma_jfc *jfc,
+			      struct ubcore_udata *udata)
+{
+	struct udma_create_jfc_resp resp = {};
+	unsigned long byte;
+
+	if (!jfc->dtu_en)
+		return 0;
+
+	if (udma_check_base_param(udata->udrv_data->out_addr,
+				  udata->udrv_data->out_len, sizeof(resp))) {
+		dev_err(dev->dev, "invalid out_addr or out_len=%u.\n",
+			udata->udrv_data->out_len);
+		return -EINVAL;
+	}
+
+	resp.buf_addr = jfc->buf.addr;
+
+	byte = copy_to_user((void *)(uintptr_t)udata->udrv_data->out_addr,
+			    &resp, sizeof(resp));
+	if (byte) {
+		dev_err(dev->dev, "failed to copy to user, ret = %lu.\n", byte);
+		return -EFAULT;
+	}
+
+	return 0;
 }
 
 struct ubcore_jfc *udma_create_jfc(struct ubcore_device *ubcore_dev,
@@ -446,8 +591,7 @@ struct ubcore_jfc *udma_create_jfc(struct ubcore_device *ubcore_dev,
 		return &jfc->base;
 	}
 
-	ret = udma_id_alloc_auto_grow(dev, &dev->jfc_table.ida_table,
-				      &jfc->jfcn);
+	ret = udma_alloc_normal_jfc_id_detail(dev, &jfc->jfcn);
 	if (ret)
 		goto err_get_cmd;
 
@@ -458,7 +602,7 @@ struct ubcore_jfc *udma_create_jfc(struct ubcore_device *ubcore_dev,
 	xa_unlock_irqrestore(&dev->jfc_table.xa, flags_store);
 	if (ret) {
 		dev_err(dev->dev,
-			"failed to stored jfc id to jfc_table, jfcn: %u.\n",
+			"failed to stored JFC id to JFC table, jfcn: %u.\n",
 			jfc->jfcn);
 		goto err_store_jfcn;
 	}
@@ -466,6 +610,11 @@ struct ubcore_jfc *udma_create_jfc(struct ubcore_device *ubcore_dev,
 	ret = udata ? udma_alloc_u_cq(dev, &ucmd, jfc) : udma_alloc_k_cq(dev, jfc);
 	if (ret)
 		goto err_get_jfc_buf;
+	if (udata) {
+		ret = udma_jfc_copy_resp(dev, jfc, udata);
+		if (ret)
+			goto err_alloc_cqc;
+	}
 
 	ret = udma_post_create_jfc_mbox(dev, jfc);
 	if (ret)
@@ -591,7 +740,7 @@ static int udma_set_jfc_depth(struct ubcore_jfc *jfc, void *buf)
 		UDMA_JFC_DEPTH_MIN : roundup_pow_of_two(depth);
 	if (depth > dev->caps.jfc.depth) {
 		dev_err(dev->dev,
-			"set jfc depth fail, depth = %u, cap depth = %u.\n",
+			"set JFC depth fail, depth = %u, cap depth = %u.\n",
 			depth, dev->caps.jfc.depth);
 		return -EINVAL;
 	}
@@ -628,13 +777,13 @@ static int udma_set_jfc_cqe_base_addr(
 	uint64_t pfn;
 
 	if (!IS_ALIGNED(base_addr, PAGE_SIZE)) {
-		dev_err(dev->dev, "vaddr isn't aligned.\n");
+		dev_err(dev->dev, "virtual address isn't aligned.\n");
 		return -EINVAL;
 	}
 
 	if (ujfc->mode != UDMA_STARS_JFC_TYPE && ujfc->mode != UDMA_CCU_JFC_TYPE &&
 	    ujfc->mode != UDMA_UCP_JFC_TYPE) {
-		dev_err(dev->dev, "The jfc(jfcn:%u) is not of CCU or STARS or UCP type.\n",
+		dev_err(dev->dev, "The JFC(JFC number:%u) is not of CCU or STARS or UCP type.\n",
 			ujfc->jfcn);
 		return -EINVAL;
 	}
@@ -647,7 +796,7 @@ static int udma_set_jfc_cqe_base_addr(
 	mmap_read_lock(current->mm);
 	vma = vma_lookup(current->mm, base_addr);
 	if (!vma || ((vma->vm_flags & VM_PFNMAP) == 0)) {
-		dev_err(dev->dev, "get vma fail or vma is not a PFN mapping.\n");
+		dev_err(dev->dev, "get VMA fail or VMA is not a PFN mapping.\n");
 		goto err_get_page_dir;
 	}
 
@@ -667,8 +816,8 @@ err_get_page_dir:
 
 static int set_jfc_mode(struct udma_jfc *jfc, struct udma_dev *dev, uint32_t jfc_id)
 {
-	struct udma_res stars_jfc = dev->caps.stars_jetty;
-	struct udma_res ccu_jfc = dev->caps.ccu_jetty;
+	struct udma_res stars_jfc = dev->caps.stars_jfc;
+	struct udma_res ccu_jfc = dev->caps.ccu_jfc;
 	struct udma_res jfc_all = dev->caps.jfc;
 	struct udma_res ucp_jfc = dev->caps.ucp_caps.ucp_jfc;
 
@@ -685,7 +834,7 @@ static int set_jfc_mode(struct udma_jfc *jfc, struct udma_dev *dev, uint32_t jfc
 		   jfc_id < jfc_all.start_idx + jfc_all.max_cnt) {
 		jfc->mode = UDMA_NORMAL_JFC_TYPE;
 	} else {
-		dev_err(dev->dev, "jfc_id to set is invalid:jfc_id:%u", jfc_id);
+		dev_err(dev->dev, "JFC id to set is invalid, JFC id:%u.\n", jfc_id);
 		return -EINVAL;
 	}
 
@@ -736,7 +885,7 @@ static int udma_set_jfc_id(struct ubcore_jfc *jfc, void *buf)
 		udma_id_free(&dev->jfc_table.ida_table, ujfc->jfcn);
 		ujfc->mode = UDMA_NORMAL_JFC_TYPE;
 		dev_err(dev->dev,
-			"failed to stored jfc id to jfc_table, jfcn: %u.\n",
+			"failed to stored JFC id to JFC table, jfcn: %u.\n",
 			ujfc->jfcn);
 		return -EINVAL;
 	}
@@ -744,8 +893,18 @@ static int udma_set_jfc_id(struct ubcore_jfc *jfc, void *buf)
 	return 0;
 }
 
-static int udma_get_jfc_ctx(struct udma_jfc_ctx *jfc_ctx,
-			    struct udma_dev *dev, uint32_t jfcn)
+static int udma_set_jfc_db_addr(struct ubcore_jfc *jfc, void *buf)
+{
+	struct udma_jfc *ujfc = to_udma_jfc(jfc);
+
+	ujfc->db.db_addr = *(uint64_t *)buf;
+
+	return 0;
+}
+
+static int udma_query_jfc_ctx(struct udma_dev *dev,
+			      struct udma_jfc_ctx *jfc_ctx,
+			      uint32_t jfcn)
 {
 	struct ubase_mbx_attr mbox_attr = {};
 	struct ubase_cmd_mailbox *mailbox;
@@ -772,9 +931,9 @@ static int udma_get_jfc_pi(struct ubcore_jfc *jfc, void *buf)
 	struct udma_jfc_ctx udma_jfc_ctx;
 	int ret;
 
-	ret = udma_get_jfc_ctx(&udma_jfc_ctx, dev, ujfc->jfcn);
+	ret = udma_query_jfc_ctx(dev, &udma_jfc_ctx, ujfc->jfcn);
 	if (ret) {
-		dev_err(dev->dev, "failed to get jfc ctx.\n");
+		dev_err(dev->dev, "failed to get JFC context.\n");
 		return ret;
 	}
 
@@ -790,13 +949,35 @@ static int udma_get_jfc_ci(struct ubcore_jfc *jfc, void *buf)
 	struct udma_jfc_ctx udma_jfc_ctx;
 	int ret;
 
-	ret = udma_get_jfc_ctx(&udma_jfc_ctx, dev, ujfc->jfcn);
+	ret = udma_query_jfc_ctx(dev, &udma_jfc_ctx, ujfc->jfcn);
 	if (ret) {
-		dev_err(dev->dev, "failed to get jfc ctx.\n");
+		dev_err(dev->dev, "failed to get JFC context.\n");
 		return ret;
 	}
 
 	*(uint32_t *)buf = udma_jfc_ctx.ci;
+
+	return 0;
+}
+
+static int udma_get_jfc_full_ctx(struct ubcore_jfc *jfc, void *buf, uint32_t len)
+{
+	struct udma_dev *dev = to_udma_dev(jfc->ub_dev);
+	struct udma_jfc *udma_jfc = to_udma_jfc(jfc);
+	int ret;
+
+	if (len != sizeof(struct udma_jfc_ctx)) {
+		dev_err(dev->dev, "get JFC full ctx len %u error, should be %u.\n",
+			len, (uint32_t)sizeof(struct udma_jfc_ctx));
+		return -EINVAL;
+	}
+
+	ret = udma_query_jfc_ctx(dev, (struct udma_jfc_ctx *)buf, udma_jfc->jfcn);
+	if (ret) {
+		dev_err(dev->dev, "failed to query JFC ctx, id = %u, ret = %d.\n",
+			udma_jfc->jfcn, ret);
+		return ret;
+	}
 
 	return 0;
 }
@@ -860,7 +1041,7 @@ static int udma_destroy_and_flush_jfc(struct udma_dev *dev, uint32_t jfcn)
 
 	ret = udma_post_destroy_jfc_mbox(dev, jfcn);
 	if (ret) {
-		dev_err(dev->dev, "failed to post mbox to destroy jfc, id: %u.\n", jfcn);
+		dev_err(dev->dev, "failed to post mailbox to destroy JFC, id: %u.\n", jfcn);
 		return ret;
 	}
 
@@ -872,7 +1053,7 @@ static int udma_destroy_and_flush_jfc(struct udma_dev *dev, uint32_t jfcn)
 		msleep(1 << wait_times);
 		wait_times++;
 	}
-	dev_err(dev->dev, "jfc flush timed out, id: %u.\n", jfcn);
+	dev_err(dev->dev, "JFC flush timed out, id: %u.\n", jfcn);
 
 	return -EFAULT;
 }
@@ -900,12 +1081,14 @@ int udma_set_jfc_opt(struct ubcore_jfc *jfc, uint64_t opt,
 		return udma_set_jfc_cqe_base_addr(jfc, buf, udata);
 	case UBCORE_JFC_ID:
 		return udma_set_jfc_id(jfc, buf);
+	case UBCORE_JFC_DB_ADDR:
+		return udma_set_jfc_db_addr(jfc, buf);
 	case UBCORE_JFC_DB_STATUS:
 		break;
 	case UBCORE_JFC_PI_TYPE:
 		break;
 	default:
-		dev_err(dev->dev, "invalid jfc opt = 0x%llx.\n", opt);
+		dev_err(dev->dev, "invalid JFC option = 0x%llx.\n", opt);
 		return -EINVAL;
 	}
 
@@ -916,8 +1099,8 @@ int udma_get_jfc_opt(struct ubcore_jfc *jfc, uint64_t opt,
 		     void *buf, uint32_t len,
 		     struct ubcore_udata *udata)
 {
-	struct udma_jfc *ujfc = to_udma_jfc(jfc);
 	struct udma_dev *dev = to_udma_dev(jfc->ub_dev);
+	struct udma_jfc *ujfc = to_udma_jfc(jfc);
 
 	switch (opt) {
 	// the len has been confirmed in urma to be valid
@@ -951,8 +1134,10 @@ int udma_get_jfc_opt(struct ubcore_jfc *jfc, uint64_t opt,
 		return 0;
 	case UBCORE_JFC_CI:
 		return udma_get_jfc_ci(jfc, buf);
+	case UBCORE_JFC_FULL_CTX:
+		return udma_get_jfc_full_ctx(jfc, buf, len);
 	default:
-		dev_err(dev->dev, "invalid jfc opt = 0x%llx.\n", opt);
+		dev_err(dev->dev, "invalid JFC option = 0x%llx.\n", opt);
 		return -EINVAL;
 	}
 
@@ -1093,14 +1278,14 @@ static int udma_check_jfc_attr(struct udma_dev *udma_dev, struct ubcore_jfc_attr
 
 	if ((attr->mask & UBCORE_JFC_MODERATE_COUNT) &&
 	    (attr->moderate_count >= UDMA_CQE_COALESCE_CNT_MAX)) {
-		dev_err(udma_dev->dev, "udma cqe coalesce cnt %u is invalid.\n",
+		dev_err(udma_dev->dev, "udma CQE coalesce count %u is invalid.\n",
 			attr->moderate_count);
 		return -EINVAL;
 	}
 
 	if ((attr->mask & UBCORE_JFC_MODERATE_PERIOD) &&
 	    (udma_get_cqe_period(attr->moderate_period) == -EINVAL)) {
-		dev_err(udma_dev->dev, "udma cqe coalesce period %u is invalid.\n",
+		dev_err(udma_dev->dev, "udma CQE coalesce period %u is invalid.\n",
 			attr->moderate_period);
 		return -EINVAL;
 	}
@@ -1118,7 +1303,7 @@ static int udma_modify_jfc_attr(struct udma_dev *dev, uint32_t jfcn,
 
 	mailbox = udma_alloc_cmd_mailbox(dev);
 	if (!mailbox) {
-		dev_err(dev->dev, "failed to alloc mailbox for modify jfc.\n");
+		dev_err(dev->dev, "failed to alloc mailbox for modify JFC.\n");
 		return -ENOMEM;
 	}
 
@@ -1231,7 +1416,7 @@ struct udma_cr_status {
 		return JFC_OK;
 	}
 
-	dev_err(dev->dev, "cqe status is error, status = %u, substatus = %u.\n",
+	dev_err(dev->dev, "CQE status is error, status = %u, substatus = %u.\n",
 		src_status, substatus);
 
 	return JFC_POLL_ERR;
@@ -1327,7 +1512,7 @@ static struct udma_jfr *udma_get_jfr(struct udma_dev *udma_dev,
 		udma_sq = (struct udma_jetty_queue *)xa_load(&udma_dev->jetty_table.xa, local_id);
 		if (!udma_sq) {
 			dev_warn(udma_dev->dev,
-				 "get jetty failed, jetty_id = %u.\n", local_id);
+				 "get jetty failed, jetty id = %u.\n", local_id);
 			return NULL;
 		}
 		jetty = to_udma_jetty_from_queue(udma_sq);
@@ -1391,7 +1576,7 @@ static enum jfc_poll_state udma_parse_cqe_for_send(struct udma_dev *dev,
 		(uint64_t)cqe->user_data_h << UDMA_ADDR_SHIFT |
 		cqe->user_data_l);
 	if (!queue) {
-		dev_err(dev->dev, "jetty queue addr is null, jetty_id = %u.\n", cr->local_id);
+		dev_err(dev->dev, "jetty queue address is null, jetty id = %u.\n", cr->local_id);
 		return JFC_POLL_ERR;
 	}
 
@@ -1523,9 +1708,9 @@ static void udma_inv_tid(struct udma_dev *dev, struct list_head *tid_list)
 		tid = tid_node->tid;
 		ksva = (struct iommu_sva *)xa_load(&dev->ksva_table, tid);
 		if (!ksva) {
-			dev_warn(dev->dev, "tid may have been released.\n");
+			dev_warn(dev->dev, "TID may have been released.\n");
 		} else {
-			ummu_ksva_unbind_device(ksva);
+			iommu_ksva_unbind_device(ksva);
 			__xa_erase(&dev->ksva_table, tid);
 		}
 
@@ -1544,8 +1729,8 @@ int udma_poll_jfc(struct ubcore_jfc *jfc, int cr_cnt, struct ubcore_cr *cr)
 	struct list_head tid_list;
 	unsigned long flags;
 	uint32_t ci;
-	uint32_t i;
 	int npolled;
+	int i;
 
 	INIT_LIST_HEAD(&tid_list);
 
@@ -1642,13 +1827,13 @@ int udma_bind_jfc(struct udma_dev *dev, uint32_t jfc_id, enum udma_jfc_bind_type
 	udma_jfc = (struct udma_jfc *)xa_load(&dev->jfc_table.xa, jfc_id);
 	if (!udma_jfc) {
 		xa_unlock(&dev->jfc_table.xa);
-		dev_err(dev->dev, "jfc %u is invalid.\n", jfc_id);
+		dev_err(dev->dev, "JFC %u is invalid.\n", jfc_id);
 		return -EINVAL;
 	}
 
 	if ((udma_jfc->bind_type != type) && (udma_jfc->bind_type != UDMA_UNOCP_JFC)) {
 		xa_unlock(&dev->jfc_table.xa);
-		dev_err(dev->dev, "jfc %u is bound.\n", jfc_id);
+		dev_err(dev->dev, "JFC %u is bound.\n", jfc_id);
 		return -EINVAL;
 	}
 
@@ -1669,13 +1854,13 @@ void udma_unbind_jfc(struct udma_dev *dev, uint32_t jfc_id, enum udma_jfc_bind_t
 	udma_jfc = (struct udma_jfc *)xa_load(&dev->jfc_table.xa, jfc_id);
 	if (!udma_jfc) {
 		xa_unlock(&dev->jfc_table.xa);
-		dev_err(dev->dev, "jfc %u is invalid.\n", jfc_id);
+		dev_err(dev->dev, "JFC %u is invalid.\n", jfc_id);
 		return;
 	}
 
 	if ((udma_jfc->bind_type != type) && (udma_jfc->bind_type != UDMA_UNOCP_JFC)) {
 		xa_unlock(&dev->jfc_table.xa);
-		dev_err(dev->dev, "failed to unbind jfc:%u, jfc type:%u.\n",
+		dev_err(dev->dev, "failed to unbind JFC:%u, JFC type:%u.\n",
 			jfc_id, (uint8_t)udma_jfc->bind_type);
 		return;
 	}
@@ -1692,7 +1877,7 @@ int udma_jetty_bind_jfc(struct udma_dev *dev, uint32_t send_jfc_id, uint32_t rec
 		return 0;
 
 	if (send_jfc_id == recv_jfc_id) {
-		dev_err(dev->dev, "send jfc %u = recv jfc %u.\n", send_jfc_id, recv_jfc_id);
+		dev_err(dev->dev, "send JFC %u = recv JFC %u.\n", send_jfc_id, recv_jfc_id);
 		return -EINVAL;
 	}
 
@@ -1700,14 +1885,14 @@ int udma_jetty_bind_jfc(struct udma_dev *dev, uint32_t send_jfc_id, uint32_t rec
 	udma_send_jfc = (struct udma_jfc *)xa_load(&dev->jfc_table.xa, send_jfc_id);
 	if (!udma_send_jfc) {
 		xa_unlock(&dev->jfc_table.xa);
-		dev_err(dev->dev, "jfc %u is invalid.\n", send_jfc_id);
+		dev_err(dev->dev, "JFC %u is invalid.\n", send_jfc_id);
 		return -EINVAL;
 	}
 
 	if ((udma_send_jfc->bind_type != UDMA_SEND_JFC) &&
 	    (udma_send_jfc->bind_type != UDMA_UNOCP_JFC)) {
 		xa_unlock(&dev->jfc_table.xa);
-		dev_err(dev->dev, "jfc %u is bound.\n", send_jfc_id);
+		dev_err(dev->dev, "JFC %u is bound.\n", send_jfc_id);
 		return -EINVAL;
 	}
 
@@ -1728,7 +1913,7 @@ void udma_jetty_unbind_jfc(struct udma_dev *dev, uint32_t send_jfc_id)
 	udma_send_jfc = (struct udma_jfc *)xa_load(&dev->jfc_table.xa, send_jfc_id);
 	if (!udma_send_jfc) {
 		xa_unlock(&dev->jfc_table.xa);
-		dev_err(dev->dev, "jfc id %u is invalid.\n", send_jfc_id);
+		dev_err(dev->dev, "JFC id %u is invalid.\n", send_jfc_id);
 		return;
 	}
 
@@ -1736,7 +1921,7 @@ void udma_jetty_unbind_jfc(struct udma_dev *dev, uint32_t send_jfc_id)
 	    (udma_send_jfc->bind_type != UDMA_UNOCP_JFC)) {
 		xa_unlock(&dev->jfc_table.xa);
 		dev_err(dev->dev,
-			"failed to unbind jfc:%u, jfc type is not send jfc.\n", send_jfc_id);
+			"failed to unbind JFC:%u, JFC type is not send JFC.\n", send_jfc_id);
 		return;
 	}
 

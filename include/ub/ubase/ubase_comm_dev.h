@@ -11,7 +11,6 @@
 #include <linux/dcbnl.h>
 #include <linux/list.h>
 #include <ub/ubase/ubase_comm_mbx.h>
-#include <ub/ubus/ubus.h>
 
 struct iova_slot;
 
@@ -25,7 +24,7 @@ struct iova_slot;
 #error "UBASE_MAX_VL_NUM can't less than IEEE_8021QAZ_MAX_TCS"
 #endif
 
-#define UBASE_NIC_MAX_VL_NUM	(2)
+#define UBASE_NIC_MAX_VL_NUM	(2U)
 
 #define UBASE_SUP_UBL		BIT(0)
 #define UBASE_SUP_ETH		BIT(1)
@@ -45,14 +44,14 @@ struct iova_slot;
 #define UBASE_HW_VER_K_0	(2000U)
 #define UBASE_HW_VER_K_1	(2001U)
 
-#define UBASE_URMA_RTP_ROI	UB_URMA_RTP_ROI
-#define UBASE_URMA_RTP_ROT	UB_URMA_RTP_ROT
-#define UBASE_URMA_RTP_ROL	UB_URMA_RTP_ROL
-#define UBASE_URMA_CTP_ROI	UB_URMA_CTP_ROI
-#define UBASE_URMA_CTP_ROT	UB_URMA_CTP_ROT
-#define UBASE_URMA_CTP_ROL	UB_URMA_CTP_ROL
-#define UBASE_URMA_CTP_UNO	UB_URMA_CTP_UNO
-#define UBASE_URMA_UTP_UNO	UB_URMA_UTP_UNO
+#define UBASE_URMA_RTP_ROI	BIT(16)
+#define UBASE_URMA_RTP_ROT	BIT(17)
+#define UBASE_URMA_RTP_ROL	BIT(18)
+#define UBASE_URMA_CTP_ROI	BIT(19)
+#define UBASE_URMA_CTP_ROT	BIT(20)
+#define UBASE_URMA_CTP_ROL	BIT(21)
+#define UBASE_URMA_CTP_UNO	BIT(22)
+#define UBASE_URMA_UTP_UNO	BIT(23)
 
 #define UBASE_DEV_NEED_TO_ACTIVATE	BIT(0)
 #define UBASE_ADEV_PROBE_FAIL		BIT(0)
@@ -473,4 +472,4 @@ void ubase_reinit_unregister(struct auxiliary_device *adev);
 void ubase_update_dev_status(struct auxiliary_device *adev, unsigned long status);
 void ubase_update_adev_status(struct auxiliary_device *adev, unsigned long status);
 
-#endif /* _UBASE_COMM_DEV_H_ */
+#endif /* _UB_UBASE_COMM_DEV_H_ */

@@ -14,6 +14,12 @@
 #include "cdma_uobj.h"
 #include "cdma_event.h"
 
+void cdma_cleanup_uninstalled_jfe(int fd, struct file *file)
+{
+	fput(file);
+	put_unused_fd(fd);
+}
+
 static __poll_t cdma_jfe_poll(struct cdma_jfe *jfe, struct file *filp,
 			      struct poll_table_struct *wait)
 {
@@ -175,12 +181,12 @@ static long cdma_jfce_ioctl(struct file *filp, unsigned int cmd,
 	long ret = -ENOIOCTLCMD;
 
 	if (!arg || !jfce) {
-		pr_err("jfce ioctl invalid parameter.\n");
+		pr_err("jfce ioctl invalid parameter\n");
 		return -EINVAL;
 	}
 
 	if (_IOC_TYPE(cmd) != CDMA_EVENT_CMD_MAGIC) {
-		pr_err("jfce ioctl invalid cmd type, cmd = %u.\n", cmd);
+		pr_err("jfce ioctl invalid cmd type, cmd = %u\n", cmd);
 		return ret;
 	}
 
@@ -189,7 +195,7 @@ static long cdma_jfce_ioctl(struct file *filp, unsigned int cmd,
 		ret = cdma_jfce_wait(jfce, filp, arg);
 		break;
 	default:
-		pr_err("jfce ioctl wrong nr = %u.\n", nr);
+		pr_err("jfce ioctl wrong nr = %u\n", nr);
 	}
 
 	return ret;
@@ -215,7 +221,7 @@ static int cdma_delete_jfce(struct inode *inode, struct file *filp)
 	mutex_unlock(&cfile->ctx_mutex);
 	cdma_close_uobj_fd(cfile);
 
-	pr_info("jfce is release.\n");
+	pr_info("jfce is release\n");
 	return 0;
 }
 
@@ -252,7 +258,7 @@ static int cdma_jfce_id_alloc(struct cdma_dev *cdev, struct cdma_jfce *jfce)
 	id = idr_alloc(&jfce_tbl->idr_tbl.idr, jfce, jfce_tbl->idr_tbl.min,
 		       jfce_tbl->idr_tbl.max, GFP_NOWAIT);
 	if (id < 0)
-		dev_err(cdev->dev, "alloc jfce id failed.\n");
+		dev_err(cdev->dev, "alloc jfce id failed\n");
 	spin_unlock(&jfce_tbl->lock);
 	idr_preload_end();
 
@@ -328,7 +334,7 @@ struct cdma_jfce *cdma_get_jfce_from_id(struct cdma_dev *cdev, int jfce_id)
 	spin_lock(&jfce_table->lock);
 	jfce = idr_find(&jfce_table->idr_tbl.idr, jfce_id);
 	if (!jfce) {
-		dev_err(cdev->dev, "find jfce failed, id = %d.\n", jfce_id);
+		dev_err(cdev->dev, "find jfce failed, id = %d\n", jfce_id);
 	} else {
 		file = fget(jfce->fd);
 		if (!file) {
@@ -401,7 +407,6 @@ struct cdma_jfce *cdma_alloc_jfce(struct cdma_file *cfile)
 	jfce->file = file;
 	jfce->cfile = cfile;
 	kref_get(&cfile->ref);
-	fd_install(new_fd, file);
 
 	return jfce;
 
@@ -413,15 +418,6 @@ err_put_unused_fd:
 	put_unused_fd(new_fd);
 
 	return ERR_PTR(ret);
-}
-
-void cdma_free_jfce(struct cdma_jfce *jfce)
-{
-	if (!jfce)
-		return;
-
-	fput(jfce->file);
-	put_unused_fd(jfce->fd);
 }
 
 void cdma_destroy_jfce(struct cdma_jfce *jfce)
@@ -443,8 +439,7 @@ static void cdma_write_async_event(struct cdma_jfae *jfae, u64 event_data,
 		return;
 
 	if (jfae->jfe.event_list_count >= MAX_EVENT_LIST_SIZE) {
-		pr_debug(
-			"event list overflow, and this write will be discarded.\n");
+		pr_debug("event list overflow, and this write will be discarded\n");
 		return;
 	}
 
@@ -496,7 +491,7 @@ static int cdma_get_async_event(struct cdma_jfae *jfae, struct file *filp,
 	cdev = jfae->cfile->cdev;
 
 	if (!cdev || cdev->status == CDMA_INVALID || !ctx || ctx->invalid) {
-		pr_info("wait dev invalid event success.\n");
+		pr_info("wait dev invalid event success\n");
 		async_event.event_data = 0;
 		async_event.event_type = CDMA_EVENT_DEV_INVALID;
 		if (copy_to_user((void __user *)arg, &async_event,
@@ -510,7 +505,7 @@ static int cdma_get_async_event(struct cdma_jfae *jfae, struct file *filp,
 			      &event_cnt, &event_list);
 	if (ret < 0) {
 		if (ret != -EAGAIN)
-			pr_err("wait event failed, ret = %d.\n", ret);
+			pr_err("wait event failed, ret = %d\n", ret);
 		return ret;
 	}
 
@@ -550,12 +545,12 @@ static long cdma_jfae_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 	long ret = -ENOIOCTLCMD;
 
 	if (!jfae) {
-		pr_err("jfae ioctl invalid parameter.\n");
+		pr_err("jfae ioctl invalid parameter\n");
 		return -EINVAL;
 	}
 
 	if (_IOC_TYPE(cmd) != CDMA_EVENT_CMD_MAGIC) {
-		pr_err("jfae ioctl invalid cmd type, cmd = %u.\n", cmd);
+		pr_err("jfae ioctl invalid cmd type, cmd = %u\n", cmd);
 		return ret;
 	}
 
@@ -564,7 +559,7 @@ static long cdma_jfae_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 		ret = cdma_get_async_event(jfae, filp, arg);
 		break;
 	default:
-		pr_err("jfae ioctl wrong nr = %u.\n", nr);
+		pr_err("jfae ioctl wrong nr = %u\n", nr);
 	}
 
 	return ret;
@@ -583,7 +578,7 @@ static int cdma_delete_jfae(struct inode *inode, struct file *filp)
 	mutex_unlock(&cfile->ctx_mutex);
 	cdma_close_uobj_fd(cfile);
 
-	pr_debug("jfae is release.\n");
+	pr_info("jfae is release\n");
 	return 0;
 }
 
@@ -646,15 +641,6 @@ err_put_unused_fd:
 	put_unused_fd(fd);
 
 	return NULL;
-}
-
-void cdma_free_jfae(struct cdma_jfae *jfae)
-{
-	if (!jfae)
-		return;
-
-	fput(jfae->file);
-	put_unused_fd(jfae->fd);
 }
 
 void cdma_init_jfc_event(struct cdma_jfc_event *event)

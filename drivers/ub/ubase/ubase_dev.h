@@ -271,6 +271,7 @@ struct ubase_ctrlq {
 	struct semaphore			sem;
 	struct semaphore			msg_queue_sem;
 	u32					last_clean_idx;
+	spinlock_t				send_lock;
 };
 
 struct ubase_ctx_status {
@@ -620,7 +621,10 @@ static inline void ubase_set_bitmap(unsigned long *dst, unsigned long src)
 {
 	unsigned long old = *dst;
 
-	bitmap_or(dst, &old, &src, BITS_PER_LONG);
+	if (!src)
+		*dst = src;
+	else
+		bitmap_or(dst, &old, &src, BITS_PER_LONG);
 }
 
 int ubase_adev_idx_alloc(void);
