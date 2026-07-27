@@ -685,8 +685,8 @@ static int ubase_init_dma_buf(struct ubase_dev *udev, struct ubase_dma_buf *buf,
 	int ret;
 
 	if (opc == UBASE_OPC_TA_TIMER_VA_CONFIG &&
-	    test_bit(UBASE_STATE_PREALLOC_OK_B, &udev->state_bits)
-	    && !ubase_dev_dtu_supported(udev))
+	    test_bit(UBASE_STATE_PREALLOC_OK_B, &udev->state_bits) &&
+	    !ubase_dev_dtu_supported(udev))
 		return ubase_config_ta_timer_buf_by_pmem(udev, opc);
 
 	ret = ubase_alloc_ta_buf(udev, buf);
@@ -993,11 +993,13 @@ static int ubase_notify_ctrl_plane_init_res(struct ubase_dev *udev)
 	req.flag = UBASE_CTRL_PLANE_INIT_RES;
 
 	ret = __ubase_ctrlq_send(udev, &msg, true, NULL);
-	if (ret)
+	if (ret) {
+		if (ret == -ETIMEDOUT)
+			set_bit(UBASE_STATE_INIT_AGAIN_B, &udev->state_bits);
 		dev_err(udev->dev,
 			"failed to notify ctrl plane init res, ret = %d.\n",
 			ret);
-
+	}
 	return ret;
 }
 

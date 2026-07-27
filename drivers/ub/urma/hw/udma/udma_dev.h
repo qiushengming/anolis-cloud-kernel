@@ -20,6 +20,7 @@ extern uint32_t jfr_sleep_time;
 extern uint32_t jfc_arm_mode;
 extern bool dump_aux_info;
 extern bool hugepage_enable;
+extern bool jfc_share_enable;
 
 #define UBCORE_MAX_DEV_NAME 64
 
@@ -67,6 +68,7 @@ extern bool hugepage_enable;
 enum udma_status {
 	UDMA_NORMAL,
 	UDMA_SUSPEND,
+	UDMA_ABORT,
 };
 
 struct udma_ida {
@@ -136,6 +138,7 @@ struct udma_dev {
 	void __iomem *k_db_base;
 	struct workqueue_struct *act_workq;
 	struct workqueue_struct *ae_workq;
+	struct workqueue_struct	*ue_rx_workq;
 	struct xarray ksva_table;
 	struct mutex ksva_mutex;
 	struct xarray eid_table;
@@ -163,12 +166,16 @@ struct udma_dev {
 	u8 udma_sl[UDMA_MAX_SL_NUM];
 	struct ubcore_sl_info priority_info[UDMA_MAX_SL_NUM];
 	int disable_ue_rx_count;
+	struct mutex open_rx_mutex;
+	uint32_t current_handle_tp_num;
+	bool open_ue_rx_failed;
 	struct mutex disable_ue_rx_mutex;
 	struct mutex hugepage_lock;
 	struct list_head hugepage_list;
 	atomic_t hugepage_seq;
 	struct udma_tp_cmdq_info *wait_cmdq_info;
 	struct udma_sq_reserved_info sq_reserved_info;
+	struct udma_mbox_over_cmdq_info *mbox_over_cmdq_info;
 };
 
 #define UDMA_ERR_MSG_LEN	128
@@ -207,8 +214,9 @@ void udma_destroy_tables(struct udma_dev *udma_dev);
 int udma_init_tables(struct udma_dev *udma_dev);
 int udma_probe(struct auxiliary_device *adev, const struct auxiliary_device_id *id);
 void udma_remove(struct auxiliary_device *adev);
-void udma_reset_init(struct auxiliary_device *adev);
-void udma_reset_uninit(struct auxiliary_device *adev);
-void udma_reset_down(struct auxiliary_device *adev);
+int udma_reset_init(struct auxiliary_device *adev);
+int udma_reset_uninit(struct auxiliary_device *adev);
+int udma_reset_down(struct auxiliary_device *adev);
+int udma_reset_abort(struct auxiliary_device *adev);
 
 #endif /* __UDMA_DEV_H__ */

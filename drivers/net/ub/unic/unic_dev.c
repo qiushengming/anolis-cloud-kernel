@@ -339,8 +339,7 @@ u16 unic_cqe_period_round_down(u16 cqe_period)
 	u16 i;
 
 	for (i = 0; i < ARRAY_SIZE(period) - 1; i++) {
-		if (cqe_period >= period[i] &&
-		    cqe_period < period[i + 1])
+		if (cqe_period >= period[i] && cqe_period < period[i + 1])
 			return period[i];
 	}
 
@@ -887,6 +886,8 @@ static int unic_init_netdev_priv(struct net_device *netdev,
 	priv->msg_enable = netif_msg_init(netif_debug, DEFAULT_MSG_LEVEL);
 	priv->tid = ubase_get_dev_caps(adev)->tid;
 	mutex_init(&priv->act_info.mutex);
+	mutex_init(&priv->bond_status.mutex);
+	mutex_init(&priv->stats.bond_record.lock);
 
 	ret = unic_query_dev_res(priv);
 	if (ret)
@@ -934,6 +935,8 @@ unic_unint_mac:
 err_uninit_vport:
 	unic_uninit_vport(priv);
 destroy_lock:
+	mutex_destroy(&priv->stats.bond_record.lock);
+	mutex_destroy(&priv->bond_status.mutex);
 	mutex_destroy(&priv->act_info.mutex);
 
 	return ret;
@@ -948,6 +951,8 @@ static void unic_uninit_netdev_priv(struct net_device *netdev)
 	unic_uninit_dev_addr(priv);
 	unic_uninit_mac(priv);
 	unic_uninit_vport(priv);
+	mutex_destroy(&priv->stats.bond_record.lock);
+	mutex_destroy(&priv->bond_status.mutex);
 	mutex_destroy(&priv->act_info.mutex);
 }
 
@@ -1097,11 +1102,20 @@ int unic_dev_init(struct auxiliary_device *adev)
 		goto err_unregister_event;
 	}
 
-	unic_query_ip_addr(adev);
+	ret = unic_query_ip_addr(adev);
+	if (ret) {
+		if (ret == -ETIMEDOUT)
+			ubase_update_adev_status(adev, UBASE_ADEV_PROBE_FAIL);
+
+		goto err_unregister_netdev;
+	}
+
 	unic_start_dev_period_task(netdev);
 
 	return 0;
 
+err_unregister_netdev:
+	unregister_netdev(netdev);
 err_unregister_event:
 	unic_unregister_event(adev);
 err_uninit_netdev_priv:

@@ -30,6 +30,7 @@
 #include "udma_common.h"
 #include "udma_ctrlq_tp.h"
 #include "udma_mue.h"
+#include "udma_safe_mode.h"
 #include "udma_jetty_group.h"
 
 #define UDMA_DRV_VER "1.0"
@@ -45,6 +46,7 @@ uint32_t jfr_sleep_time = 1000;
 uint32_t jfc_arm_mode;
 bool dump_aux_info;
 bool hugepage_enable = true;
+bool jfc_share_enable = true;
 
 static const struct auxiliary_device_id udma_id_table[] = {
 	{
@@ -585,6 +587,61 @@ static void udma_get_jetty_id_range(struct udma_dev *udma_dev,
 		udma_dump_jetty_id_range(udma_dev);
 }
 
+static void udma_dump_ucp_id_range(struct udma_dev *udma_dev)
+{
+#define UCP_JFX_CNT 3
+	const char *jfx_name[UCP_JFX_CNT] = {
+		"ucp_jetty",
+		"ucp_jfc",
+		"ucp_jfr",
+	};
+	struct udma_res *ucp_jfx_list[UCP_JFX_CNT] = {
+		&udma_dev->caps.ucp_caps.ucp_jetty,
+		&udma_dev->caps.ucp_caps.ucp_jfc,
+		&udma_dev->caps.ucp_caps.ucp_jfr,
+	};
+	uint32_t i;
+
+	for (i = 0; i < UCP_JFX_CNT; i++)
+		dev_info(udma_dev->dev, "%s start_idx = %u, max_cnt = %u\n",
+			 jfx_name[i], ucp_jfx_list[i]->start_idx,
+			 ucp_jfx_list[i]->max_cnt);
+
+	dev_info(udma_dev->dev, "rsvd_jetty_cnt = %u.\n", udma_dev->caps.rsvd_jetty_cnt);
+}
+
+static void udma_get_ucp_jfx_id_range(struct udma_dev *udma_dev, struct udma_cmd_ucp_resource *cmd)
+{
+	udma_dev->caps.ucp_caps.ucp_jetty.start_idx = cmd->ucp_jetty_start;
+	udma_dev->caps.ucp_caps.ucp_jetty.max_cnt = cmd->ucp_jetty_num;
+	udma_dev->caps.ucp_caps.ucp_jetty.next_idx = udma_dev->caps.ucp_caps.ucp_jetty.start_idx;
+	udma_dev->caps.ucp_caps.ucp_jfc.start_idx = cmd->ucp_jfc_start;
+	udma_dev->caps.ucp_caps.ucp_jfc.max_cnt = cmd->ucp_jfc_num;
+	udma_dev->caps.ucp_caps.ucp_jfc.next_idx = udma_dev->caps.ucp_caps.ucp_jfc.start_idx;
+	udma_dev->caps.ucp_caps.ucp_jfr.start_idx = cmd->ucp_jfr_start;
+	udma_dev->caps.ucp_caps.ucp_jfr.max_cnt = cmd->ucp_jfr_num;
+	udma_dev->caps.ucp_caps.ucp_jfr.next_idx = udma_dev->caps.ucp_caps.ucp_jfr.start_idx;
+	udma_dev->caps.rsvd_jetty_cnt += udma_dev->caps.ucp_caps.ucp_jetty.max_cnt;
+
+	if (debug_switch)
+		udma_dump_ucp_id_range(udma_dev);
+}
+
+static int udma_set_ucp_res(struct udma_dev *udma_dev)
+{
+	struct udma_cmd_ucp_resource ucp_cmd = {};
+	int ret;
+
+	ret = udma_query_ucp_res(udma_dev, (void *)&ucp_cmd);
+	if (ret) {
+		dev_err(udma_dev->dev, "fail to query ucp resource from FW %d\n", ret);
+		return ret;
+	}
+	udma_get_ucp_jfx_id_range(udma_dev, &ucp_cmd);
+
+	return 0;
+}
+
 static int query_caps_from_firmware(struct udma_dev *udma_dev)
 {
 	struct udma_cmd_ue_resource cmd = {};
@@ -612,6 +669,14 @@ static int query_caps_from_firmware(struct udma_dev *udma_dev)
 	udma_dev->caps.atomic_feat = cmd.atomic_feat;
 
 	udma_get_jetty_id_range(udma_dev, &cmd);
+
+	if (ubase_adev_ucp_supported(udma_dev->comdev.adev)) {
+		ret = udma_set_ucp_res(udma_dev);
+		if (ret) {
+			dev_err(udma_dev->dev, "fail to set ucp resource.\n");
+			return ret;
+		}
+	}
 
 	udma_dev->caps.feature = cmd.cap_info;
 	udma_dev->caps.ue_cnt = cmd.ue_cnt >= UDMA_DEV_UE_NUM ?
@@ -797,6 +862,12 @@ static int udma_set_hw_caps(struct udma_dev *udma_dev)
 	if (ret)
 		return ret;
 
+	if (!!(udma_dev->caps.feature & UDMA_CAP_FEATURE_NOT_SHARE_JFC))
+		udma_dev->caps.no_share_jfc_en = true;
+
+	if (!!(udma_dev->caps.feature & UDMA_CAP_FEATURE_WRITE_ATOMIC_ADD))
+		udma_dev->caps.atomic_add_en = true;
+
 	udma_dev->caps.max_msg_len = MAX_MSG_LEN;
 	udma_dev->caps.jetty_in_grp = MAX_JETTY_IN_JETTY_GRP;
 
@@ -852,12 +923,30 @@ static int udma_init_dev_param(struct udma_dev *udma_dev)
 		INIT_LIST_HEAD(&udma_dev->db_list[i]);
 
 	udma_init_hugepage(udma_dev);
+	spin_lock_init(&udma_dev->caps.udp.lock);
+
+	if (!ubase_adev_mbx_supported(udma_dev->comdev.adev)) {
+		ret = udma_init_mbox_over_cmdq(udma_dev);
+		if (ret) {
+			dev_err(udma_dev->dev,
+				"Failed to init mbox over cmdq, ret = %d\n", ret);
+			udma_destroy_hugepage(udma_dev);
+
+			mutex_destroy(&udma_dev->db_mutex);
+			dev_set_drvdata(&udma_dev->comdev.adev->dev, NULL);
+			udma_destroy_tables(udma_dev);
+			return ret;
+		}
+	}
 
 	return 0;
 }
 
 static void udma_uninit_dev_param(struct udma_dev *udma_dev)
 {
+	if (!ubase_adev_mbx_supported(udma_dev->comdev.adev))
+		udma_uninit_mbox_over_cmdq(udma_dev);
+
 	udma_destroy_hugepage(udma_dev);
 	mutex_destroy(&udma_dev->db_mutex);
 	dev_set_drvdata(&udma_dev->comdev.adev->dev, NULL);
@@ -1018,6 +1107,7 @@ static void udma_destroy_dev(struct udma_dev *udev)
 	for (i = ARRAY_SIZE(udma_dev_func_map) - 1; i >= 0; i--)
 		if (udma_dev_func_map[i].uninit_func)
 			udma_dev_func_map[i].uninit_func(udev);
+	mutex_destroy(&udev->open_rx_mutex);
 	kfree(udev);
 }
 
@@ -1031,6 +1121,8 @@ static struct udma_dev *udma_create_dev(struct auxiliary_device *adev)
 		return NULL;
 
 	udma_dev->comdev.adev = adev;
+	udma_dev->status = UDMA_SUSPEND;
+	mutex_init(&udma_dev->open_rx_mutex);
 
 	for (i = 0; i < ARRAY_SIZE(udma_dev_func_map); i++) {
 		if (!udma_dev_func_map[i].init_func)
@@ -1173,22 +1265,46 @@ static void udma_report_reset_event(enum ubcore_event_type event_type,
 	ubcore_dispatch_async_event(&ae);
 }
 
-static void udma_reset_handler(struct auxiliary_device *adev,
+static int udma_reinit_handler(struct auxiliary_device *adev)
+{
+	struct udma_dev *udev = get_udma_dev(adev);
+	int ret = 0;
+
+	mutex_lock(&udev->open_rx_mutex);
+	if (udev->open_ue_rx_failed) {
+		ret = udma_open_ue_rx(udev, true, false, false, udev->current_handle_tp_num);
+		if (ret)
+			dev_err(udev->dev, "udma open ue rx failed, ret = %d.\n", ret);
+		else
+			udev->open_ue_rx_failed = false;
+	}
+	mutex_unlock(&udev->open_rx_mutex);
+
+	return ret == -ETIMEDOUT ? -EAGAIN : ret;
+}
+
+static int udma_reset_handler(struct auxiliary_device *adev,
 			       enum ubase_reset_stage stage)
 {
+	int ret = 0;
+
 	switch (stage) {
 	case UBASE_RESET_STAGE_DOWN:
-		udma_reset_down(adev);
+		ret = udma_reset_down(adev);
 		break;
 	case UBASE_RESET_STAGE_UNINIT:
-		udma_reset_uninit(adev);
+		ret = udma_reset_uninit(adev);
 		break;
 	case UBASE_RESET_STAGE_INIT:
-		udma_reset_init(adev);
+		ret = udma_reset_init(adev);
 		break;
+	case UBASE_RESET_STAGE_ABORT:
+		ret = udma_reset_abort(adev);
 	default:
 		break;
 	}
+
+	return ret;
 }
 
 static int udma_init_eid_table(struct udma_dev *udma_dev)
@@ -1202,7 +1318,7 @@ static int udma_init_eid_table(struct udma_dev *udma_dev)
 	return ret;
 }
 
-static int udma_init_dev(struct auxiliary_device *adev)
+static int udma_init_dev(struct auxiliary_device *adev, bool is_probe)
 {
 	struct udma_dev *udma_dev;
 	int ret;
@@ -1236,6 +1352,8 @@ static int udma_init_dev(struct auxiliary_device *adev)
 	}
 
 	ret = udma_init_eid_table(udma_dev);
+	if (ret == -ETIMEDOUT && is_probe)
+		ubase_update_adev_status(udma_dev->comdev.adev, UBASE_ADEV_PROBE_FAIL);
 	if (ret) {
 		dev_err(udma_dev->dev, "init eid table failed.\n");
 		goto err_init_eid;
@@ -1258,7 +1376,7 @@ err_event_register:
 err_create:
 	mutex_unlock(&udma_reset_mutex);
 
-	return -EINVAL;
+	return ret == -ETIMEDOUT ? -EAGAIN : ret;
 }
 
 static void check_and_wait_flush_done(struct udma_dev *udma_dev)
@@ -1284,7 +1402,7 @@ static void check_and_wait_flush_done(struct udma_dev *udma_dev)
 	}
 }
 
-void udma_reset_down(struct auxiliary_device *adev)
+int udma_reset_down(struct auxiliary_device *adev)
 {
 	struct udma_dev *udma_dev;
 
@@ -1293,22 +1411,30 @@ void udma_reset_down(struct auxiliary_device *adev)
 	if (!udma_dev) {
 		mutex_unlock(&udma_reset_mutex);
 		dev_info(&adev->dev, "udma device is not exist.\n");
-		return;
+		return 0;
+	}
+
+	if (udma_dev->status == UDMA_ABORT) {
+		mutex_unlock(&udma_reset_mutex);
+		dev_info(&adev->dev, "udma device status ABORT.\n");
+		return 0;
 	}
 
 	if (udma_dev->status != UDMA_NORMAL) {
-		mutex_unlock(&udma_reset_mutex);
 		dev_info(&adev->dev, "udma device status(%u).\n", udma_dev->status);
-		return;
+		mutex_unlock(&udma_reset_mutex);
+		return -EINVAL;
 	}
 
 	ubcore_stop_requests(&udma_dev->ub_dev);
 	udma_report_reset_event(UBCORE_EVENT_ELR_ERR, udma_dev);
 	udma_dev->status = UDMA_SUSPEND;
 	mutex_unlock(&udma_reset_mutex);
+
+	return 0;
 }
 
-void udma_reset_uninit(struct auxiliary_device *adev)
+int udma_reset_uninit(struct auxiliary_device *adev)
 {
 	struct udma_dev *udma_dev;
 
@@ -1317,19 +1443,19 @@ void udma_reset_uninit(struct auxiliary_device *adev)
 	if (!udma_dev) {
 		dev_info(&adev->dev, "udma device is not exist.\n");
 		mutex_unlock(&udma_reset_mutex);
-		return;
+		return 0;
 	}
 
-	if (udma_dev->status != UDMA_SUSPEND) {
+	if (udma_dev->status != UDMA_SUSPEND && udma_dev->status != UDMA_ABORT) {
 		dev_info(&adev->dev, "udma device status(%u).\n", udma_dev->status);
 		mutex_unlock(&udma_reset_mutex);
-		return;
+		return -EINVAL;
 	}
 
 	if (udma_close_ue_rx(udma_dev, false, false, true, 0)) {
 		mutex_unlock(&udma_reset_mutex);
 		dev_err(&adev->dev, "udma close ue rx failed in reset process.\n");
-		return;
+		return -EINVAL;
 	}
 
 	udma_unregister_none_crq_event(adev);
@@ -1340,21 +1466,42 @@ void udma_reset_uninit(struct auxiliary_device *adev)
 	udma_unregister_crq_event(adev);
 	udma_destroy_dev(udma_dev);
 	mutex_unlock(&udma_reset_mutex);
+
+	return 0;
 }
 
-void udma_reset_init(struct auxiliary_device *adev)
+int udma_reset_init(struct auxiliary_device *adev)
 {
-	udma_init_dev(adev);
+	return udma_init_dev(adev, false);
+}
+
+int udma_reset_abort(struct auxiliary_device *adev)
+{
+	struct udma_dev *udma_dev;
+
+	mutex_lock(&udma_reset_mutex);
+	udma_dev = get_udma_dev(adev);
+	if (!udma_dev) {
+		mutex_unlock(&udma_reset_mutex);
+		dev_info(&adev->dev, "udma device is not exist.\n");
+		return 0;
+	}
+
+	udma_dev->status = UDMA_ABORT;
+	mutex_unlock(&udma_reset_mutex);
+
+	return 0;
 }
 
 int udma_probe(struct auxiliary_device *adev,
 	       const struct auxiliary_device_id *id)
 {
-	if (udma_init_dev(adev)) {
+	if (udma_init_dev(adev, true)) {
 		ubase_adev_fault_log(adev, UDMA_FAULT_EVENT_ID_PROBE, NULL);
 		return -EINVAL;
 	}
 
+	ubase_reinit_register(adev, udma_reinit_handler);
 	ubase_reset_register(adev, udma_reset_handler);
 	return 0;
 }
@@ -1368,14 +1515,29 @@ void udma_remove(struct auxiliary_device *adev)
 	struct udma_dev *udma_dev;
 
 	ubase_reset_unregister(adev);
-	mutex_lock(&udma_reset_mutex);
-	udma_dev = get_udma_dev(adev);
-	if (!udma_dev) {
-		mutex_unlock(&udma_reset_mutex);
-		dev_info(&adev->dev, "udma device is not exist.\n");
-		return;
+	ubase_reinit_unregister(adev);
+
+	while (true) {
+		mutex_lock(&udma_reset_mutex);
+		udma_dev = get_udma_dev(adev);
+		if (!udma_dev) {
+			mutex_unlock(&udma_reset_mutex);
+			dev_info(&adev->dev, "udma device is not exist.\n");
+			return;
+		}
+
+		if (udma_dev->status == UDMA_SUSPEND) {
+			mutex_unlock(&udma_reset_mutex);
+			msleep(wait_time);
+			if (wait_time < MAX_SLEEP_TIME)
+				wait_time *= TIME_SLEEP_RATE;
+			continue;
+		} else {
+			udma_dev->status = UDMA_SUSPEND;
+			break;
+		}
 	}
-	udma_dev->status = UDMA_SUSPEND;
+
 	ubcore_stop_requests(&udma_dev->ub_dev);
 	while (true) {
 		if (!udma_close_ue_rx(udma_dev, false, false, false, 0)) {
@@ -1401,7 +1563,9 @@ void udma_remove(struct auxiliary_device *adev)
 	ubcore_unregister_device(&udma_dev->ub_dev);
 	udma_unregister_workqueue(udma_dev);
 	check_and_wait_flush_done(udma_dev);
-	(void)ubase_activate_dev(adev);
+	if (ubase_activate_dev(adev))
+		ubase_update_dev_status(adev, UBASE_DEV_NEED_TO_ACTIVATE);
+	/* Crq event should unregister after wait flush done,  */
 	udma_unregister_crq_event(adev);
 	udma_destroy_dev(udma_dev);
 	mutex_unlock(&udma_reset_mutex);
@@ -1413,6 +1577,9 @@ static struct auxiliary_driver udma_drv = {
 	.probe = udma_probe,
 	.remove = udma_remove,
 	.id_table = udma_id_table,
+	.driver = {
+		.probe_type = PROBE_FORCE_SYNCHRONOUS,
+	},
 };
 
 static int __init udma_init(void)
@@ -1466,3 +1633,6 @@ MODULE_PARM_DESC(dump_aux_info,
 
 module_param(hugepage_enable, bool, 0644);
 MODULE_PARM_DESC(hugepage_enable, "Set huge page enable, default: 1(0:disable, 1:enable)");
+
+module_param(jfc_share_enable, bool, 0644);
+MODULE_PARM_DESC(jfc_share_enable, "Set jfc share enable, default: 1(0:disable, 1:enable)");

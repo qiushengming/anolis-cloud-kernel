@@ -663,10 +663,16 @@ struct ubcore_jetty *udma_create_jetty(struct ubcore_device *ub_dev, struct ubco
 	if (!udma_jetty)
 		return ERR_PTR(-ENOMEM);
 
+	ret = udma_jetty_bind_jfc(udma_dev, cfg->send_jfc->id, cfg->recv_jfc->id);
+	if (ret) {
+		kfree(udma_jetty);
+		return ERR_PTR(ret);
+	}
+
 	ret = udma_active_jetty_detail(udma_dev, udma_jetty, cfg, udata);
 	if (ret) {
 		dev_err(udma_dev->dev, "active jetty detail failed, ret = %d.\n", ret);
-
+		udma_jetty_unbind_jfc(udma_dev, cfg->send_jfc->id);
 		kfree(udma_jetty);
 		return ERR_PTR(ret);
 	}
@@ -902,6 +908,7 @@ static void udma_free_jetty_detail(struct ubcore_jetty *jetty)
 	struct udma_dev *udma_dev = to_udma_dev(jetty->ub_dev);
 	struct udma_jetty *udma_jetty = to_udma_jetty(jetty);
 
+	udma_jetty_unbind_jfc(udma_dev, jetty->jetty_cfg.send_jfc->id);
 
 	udma_clean_cqe_for_jetty(udma_dev, &udma_jetty->sq, jetty->jetty_cfg.send_jfc,
 				 jetty->jetty_cfg.recv_jfc);
@@ -941,12 +948,12 @@ int udma_deactive_jetty(struct ubcore_jetty *jetty, struct ubcore_udata *udata)
 		dev_err(udma_dev->dev, "udma modify error and destroy jetty failed, id: %u.\n",
 			jetty->jetty_id.id);
 		if (!udma_jetty->ue_rx_closed)
-			udma_open_ue_rx(udma_dev, true, true, false, 0);
+			udma_open_ue_rx_with_retry(udma_dev, true, true, false, 0);
 		return ret;
 	}
 
 	udma_free_jetty_detail(jetty);
-	udma_open_ue_rx(udma_dev, true, true, false, 0);
+	udma_open_ue_rx_with_retry(udma_dev, true, true, false, 0);
 
 	udma_jetty->sq.activated = false;
 
@@ -1359,7 +1366,7 @@ static int udma_modify_jetty_state(struct udma_dev *udma_dev, struct udma_jetty 
 		if (!(udma_dev->caps.feature & UDMA_CAP_FEATURE_UE_RX_CLOSE)) {
 			if (udma_modify_jetty_precondition(udma_dev, &udma_jetty->sq)) {
 				ret = -ENOMEM;
-				udma_open_ue_rx(udma_dev, true, true, false, 0);
+				udma_open_ue_rx_with_retry(udma_dev, true, true, false, 0);
 				break;
 			}
 		}
@@ -1367,7 +1374,7 @@ static int udma_modify_jetty_state(struct udma_dev *udma_dev, struct udma_jetty 
 		ret = udma_set_jetty_state(udma_dev, udma_jetty->sq.id,
 					   to_jetty_state(attr->state));
 		if (ret)
-			udma_open_ue_rx(udma_dev, true, true, false, 0);
+			udma_open_ue_rx_with_retry(udma_dev, true, true, false, 0);
 		else
 			udma_jetty->ue_rx_closed = true;
 		break;
@@ -1706,8 +1713,13 @@ int udma_active_jetty(struct ubcore_jetty *jetty, struct ubcore_udata *udata)
 	struct udma_jetty *udma_jetty = to_udma_jetty(jetty);
 	int ret = 0;
 
+	if (udma_jetty_bind_jfc(udma_dev, jetty->jetty_cfg.send_jfc->id,
+				jetty->jetty_cfg.recv_jfc->id))
+		return -EINVAL;
+
 	ret = udma_active_jetty_detail(udma_dev, udma_jetty, &jetty->jetty_cfg, udata);
 	if (ret) {
+		udma_jetty_unbind_jfc(udma_dev, jetty->jetty_cfg.send_jfc->id);
 		dev_err(udma_dev->dev, "failed to active jetty, ret = %d.\n", ret);
 		return ret;
 	}

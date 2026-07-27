@@ -23,55 +23,13 @@
 
 #include "ubase.h"
 #include "ubase_eq.h"
+#include "ubase_log.h"
 #include "ubase_proxy.h"
 #include "ubase_ubus.h"
 
 #define UBASE_MOD_VERSION		"1.0"
-
-#define ubase_dbg(_udev, fmt, ...) do {	                                      \
-	if (ubase_dbg_default())                                              \
-		dev_info(_udev->dev, "(pid %d) " fmt,                         \
-			 current->pid, ##__VA_ARGS__);                        \
-	} while (0)
-
-#define ubase_err(_udev, fmt, ...)                                            \
-	dev_err(_udev->dev, "(pid %d) " fmt,                                  \
-		current->pid, ##__VA_ARGS__)
-
-#define ubase_info(_udev, fmt, ...)                                           \
-	dev_info(_udev->dev, "(pid %d) " fmt,                                 \
-		 current->pid, ##__VA_ARGS__)
-
-#define ubase_warn(_udev, fmt, ...)                                           \
-	dev_warn(_udev->dev, "(pid %d) " fmt,                                 \
-		 current->pid, ##__VA_ARGS__)
-
-#define ubase_err_rl(_udev, log_cnt, fmt, ...) do {                           \
-	if (__ratelimit(&(_udev->log_rs.rs))) {                               \
-		ubase_err(_udev, fmt, ##__VA_ARGS__);                         \
-	} else {                                                              \
-		(log_cnt)++;                                                  \
-		ubase_dbg(_udev, fmt, ##__VA_ARGS__);                         \
-	}                                                                     \
-} while (0)
-
-#define ubase_info_rl(_udev, log_cnt, fmt, ...) do {                          \
-	if (__ratelimit(&(_udev->log_rs.rs))) {                               \
-		ubase_info(_udev, fmt, ##__VA_ARGS__);                        \
-	} else {                                                              \
-		(log_cnt)++;                                                  \
-		ubase_dbg(_udev, fmt, ##__VA_ARGS__);                         \
-	}                                                                     \
-} while (0)
-
-#define ubase_warn_rl(_udev, log_cnt, fmt, ...) do {                          \
-	if (__ratelimit(&(_udev->log_rs.rs))) {                               \
-		ubase_warn(_udev, fmt, ##__VA_ARGS__);                        \
-	} else {                                                              \
-		(log_cnt)++;                                                  \
-		ubase_dbg(_udev, fmt, ##__VA_ARGS__);                         \
-	}                                                                     \
-} while (0)
+#define UBASE_ADEV_PROBE_FAIL_B		0
+#define UBASE_DEV_NEED_TO_ACTIVATE_B	0
 
 struct ubase_ctx_buf {
 	struct ubase_ctx_buf_cap jfs;
@@ -133,15 +91,18 @@ struct ubase_adev {
 	struct mutex	port_lock;
 	void (*port_handler)(struct auxiliary_device *adev, bool link_up);
 	struct mutex	reset_lock;
-	void (*reset_handler)(struct auxiliary_device *adev,
-			      enum ubase_reset_stage stage);
+	int (*reset_handler)(struct auxiliary_device *adev,
+			     enum ubase_reset_stage stage);
 	struct mutex	activate_lock;
 	void (*activate_handler)(struct auxiliary_device *adev, bool activate);
+	struct mutex	reinit_lock;
+	int (*reinit_handler)(struct auxiliary_device *adev);
 };
 
 struct ubase_priv {
 	struct ubase_adev *uadev[UBASE_DRV_MAX];
 	struct mutex uadev_lock; /* protect uadev[] */
+	unsigned long adev_status[UBASE_DRV_MAX];
 };
 
 struct ubase_dev_caps {
@@ -153,6 +114,7 @@ struct ubase_dev_caps {
 struct ubase_mbox_cmd {
 	struct dma_pool *pool;
 	struct semaphore sem;
+	raw_spinlock_t mbx_lock;
 	struct ubase_mbx_event_context ctx;
 	atomic_t mbx_cnt;
 };
@@ -211,6 +173,10 @@ enum ubase_dev_state_bit {
 	UBASE_STATE_PREALLOC_OK_B,
 	UBASE_STATE_RST_WAIT_DEACTIVE_B,
 	UBASE_STATE_SHUTDOWN,
+	UBASE_STATE_CMD_CRQ_UNAVAIL_B,
+	UBASE_STATE_REMOVING_B,
+	UBASE_STATE_INIT_AGAIN_B,
+	UBASE_STATE_RST_TIMEOUT_RETRY_B,
 };
 
 struct ubase_crq_event_nbs {
@@ -303,6 +269,8 @@ struct ubase_ctrlq {
 	struct ubase_ctrlq_ue_req_table		ue_req_table;
 	struct ubase_ctrlq_ue_resp_table	ue_resp_table;
 	struct semaphore			sem;
+	struct semaphore			msg_queue_sem;
+	u32					last_clean_idx;
 };
 
 struct ubase_ctx_status {
@@ -374,19 +342,11 @@ struct ubase_mbox_over_cmdq_info {
 	wait_queue_head_t queue;
 };
 
-struct ubase_log_rs {
-	struct ratelimit_state rs;
-	u16 ctrlq_other_seq_invalid_log_cnt;
-	u64 aeq_event_type_exceed_max_cnt;
-	u32 ctrlq_wait_resp_timeout_cnt;
-	u32 ctrlq_pi_invalid_cnt;
-	u32 mbx_buff_not_empty_cnt;
-};
-
 struct ubase_dtu_info {
 	struct iommu_domain	*domain;
 	struct iova_slot	*dtu_slot;
 	u16			dtu_win_num;
+	u16			dtu_win_num_udma;
 	int			dtu_mem_node_id;
 };
 
@@ -414,6 +374,8 @@ struct ubase_mem_init_ops {
 	int (*mem_init)(struct device *dev, struct ubase_mm_ops *mm_ops);
 	void (*mem_uninit)(struct device *dev, struct ubase_mm_ops *mm_ops);
 };
+
+typedef int (*ub_entity_enable_ret)(struct ub_entity *uent, u8 enable);
 
 struct ubase_dev {
 	struct device		*dev;
@@ -467,6 +429,8 @@ struct ubase_dev {
 	struct ubase_mem_init_ops	mem_init_ops;
 	struct ubase_mm_ops	mm_ops;
 	gfp_t			gfp;
+	unsigned long		status;
+	int (*ub_entity_enable_ret)(struct ub_entity *uent, u8 enable);
 };
 
 #define UBASE_ERR_MSG_LEN	128
@@ -478,7 +442,7 @@ struct ubase_init_function {
 	void (*uninit_func)(struct ubase_dev *udev);
 };
 
-bool ubase_dbg_default(void);
+bool ubase_dbg_log(void);
 bool ubase_dev_urma_supported(struct ubase_dev *udev);
 bool ubase_dev_unic_supported(struct ubase_dev *udev);
 bool ubase_dev_cdma_supported(struct ubase_dev *udev);
@@ -652,6 +616,13 @@ static inline bool ubase_is_ctrl_node(struct ubase_dev *udev)
 	return udev->node_type == UBASE_NODE_TYPE_INBAND_CTRL;
 }
 
+static inline void ubase_set_bitmap(unsigned long *dst, unsigned long src)
+{
+	unsigned long old = *dst;
+
+	bitmap_or(dst, &old, &src, BITS_PER_LONG);
+}
+
 int ubase_adev_idx_alloc(void);
 void ubase_adev_idx_free(int id);
 
@@ -664,8 +635,10 @@ void ubase_dev_uninit(struct ubase_dev *udev);
 int ubase_dev_reset_init(struct ubase_dev *udev);
 void ubase_dev_reset_uninit(struct ubase_dev *udev);
 
-void ubase_suspend_aux_devices(struct ubase_dev *udev);
-void ubase_resume_aux_devices(struct ubase_dev *udev);
+void ubase_suspend_aux_devices(struct ubase_dev *udev,
+			       enum ubase_reset_stage stage);
+int ubase_resume_aux_devices(struct ubase_dev *udev,
+			     enum ubase_reset_stage stage);
 
 void ubase_virt_handler(struct ubase_dev *udev, u16 bus_ue_id, bool is_en);
 
@@ -680,5 +653,7 @@ void *ubase_alloc_buf(struct ubase_dev *udev, size_t size,
 		      dma_addr_t *iova, struct page **page);
 void ubase_free_buf(struct ubase_dev *udev, size_t size,
 		    void *va, dma_addr_t iova, struct page *page);
+int ubase_reinit_aux_devices(struct ubase_dev *udev);
+int __ubase_activate_dev(struct ubase_dev *udev);
 
 #endif /* __UBASE_DEV_H__ */
