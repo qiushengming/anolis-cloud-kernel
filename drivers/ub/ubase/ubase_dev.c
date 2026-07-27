@@ -873,24 +873,20 @@ static const struct ubase_init_function ubase_init_func_map[] = {
 		ubase_query_port_bitmap, NULL
 	},
 	{
-		"init irq table", UBASE_SUP_ALL, 1,
-		ubase_irq_table_init, ubase_irq_table_uninit
-	},
-	{
 		"init ctrl queue", UBASE_SUP_NO_PMU, 1,
 		ubase_ctrlq_init, ubase_ctrlq_uninit
-	},
-	{
-		"register aeq event", UBASE_SUP_NO_PMU, 0,
-		ubase_register_ae_event, ubase_unregister_ae_event
 	},
 	{
 		"register cmdq crq event", UBASE_SUP_NO_PMU, 0,
 		ubase_register_cmdq_crq_event, ubase_unregister_cmdq_crq_event
 	},
 	{
-		"register ctrlq crq event", UBASE_SUP_NO_PMU, 0,
-		NULL, NULL
+		"init irq table", UBASE_SUP_ALL, 1,
+		ubase_irq_table_init, ubase_irq_table_uninit
+	},
+	{
+		"register aeq event", UBASE_SUP_NO_PMU, 0,
+		ubase_register_ae_event, ubase_unregister_ae_event
 	},
 	{
 		"init qos", UBASE_SUP_NO_PMU, 0,
@@ -1211,6 +1207,11 @@ u32 ubase_get_hw_ver(struct auxiliary_device *adev)
 	case UBASE_DEV_ID_A_V2_UBOE_MUE:
 	case UBASE_DEV_ID_A_V2_UBOE_UE:
 		return UBASE_HW_VER_A_1;
+	case UBASE_DEV_ID_S_0_URMA_MUE:
+	case UBASE_DEV_ID_S_0_URMA_UE:
+	case UBASE_DEV_ID_S_0_PMU_MUE:
+	case UBASE_DEV_ID_S_0_CDMA_MUE:
+		return UBASE_HW_VER_S_0;
 	default:
 		return UBASE_HW_VER_UNKNOWN;
 	}
@@ -1893,21 +1894,30 @@ static bool ubase_fast_shutdown(struct ubase_dev *udev,
 		 ubase_is_ctrl_node(udev));
 }
 
+static u32 ubase_get_activate_timeout(struct ubase_dev *udev, bool fast)
+{
+#define UBASE_ACTIVE_DEV_TIMEOUT_FAST	1000
+#define UBASE_ACTIVE_DEV_TIMEOUT_PROXY	3000
+#define UBASE_ACTIVE_DEV_TIMEOUT	3200
+
+	if (fast)
+		return UBASE_ACTIVE_DEV_TIMEOUT_FAST;
+
+	return ubase_activate_proxy_supported(udev) ?
+	       UBASE_ACTIVE_DEV_TIMEOUT_PROXY :
+	       UBASE_ACTIVE_DEV_TIMEOUT;
+}
+
 static int ubase_wait_activate_done(struct ubase_dev *udev, u16 bus_ue_id,
 				    struct ubase_act_info *info)
 {
-#define UBASE_ACTIVE_DEV_TIMEOUT_FAST 1000
-#define UBASE_ACTIVE_DEV_TIMEOUT 3000
-
 	/* If cmdq crq is unavailable, we can't recv the resp.
 	 * so no need to wait too long
 	 */
 	bool fast = ubase_fast_shutdown(udev, info) ||
 		    test_bit(UBASE_STATE_CMD_CRQ_UNAVAIL_B, &udev->state_bits);
-	u32 timeout;
+	u32 timeout = ubase_get_activate_timeout(udev, fast);
 
-	timeout = fast ? UBASE_ACTIVE_DEV_TIMEOUT_FAST :
-			 UBASE_ACTIVE_DEV_TIMEOUT;
 	if (!wait_for_completion_timeout(&info->activate_done,
 					 msecs_to_jiffies(timeout))) {
 		ubase_err(udev,
@@ -1928,6 +1938,7 @@ static void ubase_record_msn(struct ubase_dev *udev, u16 bus_ue_id, u16 msn)
 		&udev->act_ctx.other;
 
 	info->wait_msn = msn;
+	reinit_completion(&info->activate_done);
 }
 
 static void ubase_alloc_msn(struct ubase_dev *udev, u16 *msn)

@@ -116,12 +116,17 @@ void unic_enable_channels(struct unic_dev *unic_dev)
 	if (!unic_dev->channels.c)
 		goto out;
 
+	if (test_bit(UNIC_NAPI_ENABLED, &unic_dev->channels.state))
+		goto out;
+
 	for (i = 0; i < unic_dev->channels.num; i++) {
 		c = &unic_dev->channels.c[i];
 		napi_enable(&c->napi);
 	}
 
 	ubase_comp_register(adev, unic_comp_handler);
+
+	set_bit(UNIC_NAPI_ENABLED, &unic_dev->channels.state);
 
 out:
 	mutex_unlock(&unic_dev->channels.mutex);
@@ -137,12 +142,17 @@ void unic_disable_channels(struct unic_dev *unic_dev)
 	if (!unic_dev->channels.c)
 		goto out;
 
+	if (!test_bit(UNIC_NAPI_ENABLED, &unic_dev->channels.state))
+		goto out;
+
 	ubase_comp_unregister(adev);
 
 	for (i = 0; i < unic_dev->channels.num; i++) {
 		c = &unic_dev->channels.c[i];
 		napi_disable(&c->napi);
 	}
+
+	clear_bit(UNIC_NAPI_ENABLED, &unic_dev->channels.state);
 
 out:
 	mutex_unlock(&unic_dev->channels.mutex);
@@ -439,6 +449,7 @@ static void unic_fetch_stats_tx(struct rtnl_link_stats64 *stats,
 		stats->tx_errors += channel->sq->stats.fd_cnt;
 		stats->tx_errors += channel->sq->stats.drop_cnt;
 		stats->tx_errors += channel->sq->stats.cfg5_drop_cnt;
+		stats->tx_errors += channel->sq->stats.abn_cqe_total_cnt;
 
 		stats->tx_dropped += channel->sq->stats.pad_err;
 		stats->tx_dropped += channel->sq->stats.over_max_sge_num;
@@ -447,6 +458,7 @@ static void unic_fetch_stats_tx(struct rtnl_link_stats64 *stats,
 		stats->tx_dropped += channel->sq->stats.fd_cnt;
 		stats->tx_dropped += channel->sq->stats.drop_cnt;
 		stats->tx_dropped += channel->sq->stats.cfg5_drop_cnt;
+		stats->tx_dropped += channel->sq->stats.abn_cqe_total_cnt;
 	} while (u64_stats_fetch_retry(&channel->sq->syncp, start));
 }
 

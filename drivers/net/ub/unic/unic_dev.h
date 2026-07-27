@@ -55,6 +55,7 @@ enum unic_channel_state {
 	UNIC_RX_CHANGED,
 	UNIC_TX_INITED,
 	UNIC_RX_INITED,
+	UNIC_NAPI_ENABLED,
 };
 
 #define UNIC_CQE_PERIOD_0	0
@@ -298,6 +299,7 @@ struct unic_dev {
 	u8			sw_link_status;
 	struct unic_bond_status	bond_status;
 	gfp_t			gfp;
+	u32			hw_ver;
 };
 
 int unic_dev_init(struct auxiliary_device *adev);
@@ -321,8 +323,6 @@ bool unic_rss_vl_num_changed(struct unic_dev *unic_dev, u8 vl_num);
 int unic_change_rss_size(struct unic_dev *unic_dev, u32 new_rss_size,
 			 u32 org_rss_size);
 int unic_update_channels(struct unic_dev *unic_dev, u8 vl_num);
-int unic_set_vl_map(struct unic_dev *unic_dev, u8 *dscp_prio, u8 *prio_vl,
-		    u8 map_type);
 int unic_dbg_log(void);
 
 static inline bool unic_dev_ubl_supported(struct unic_dev *unic_dev)
@@ -486,6 +486,13 @@ static inline u32 unic_cmd_timeout(struct unic_dev *unic_dev)
 #define UNIC_CMD_TIMEOUT 5000
 
 	return __unic_removing(unic_dev) ? UNIC_CMD_TIMEOUT : 0;
+}
+
+static inline bool unic_abn_cqe_count_support(struct unic_dev *unic_dev)
+{
+	return unic_dev->hw_ver != UBASE_HW_VER_UNKNOWN &&
+	       unic_dev->hw_ver != UBASE_HW_VER_K_0 &&
+	       unic_dev->hw_ver != UBASE_HW_VER_A_0;
 }
 
 #endif /* __UNIC_DEV_H__ */
